@@ -1,0 +1,8 @@
+include README.md
+include ARCHITECTURE.md
+include LICENSE
+include pyproject.toml
+recursive-include src/agent_memory *.py py.typed
+recursive-exclude tests *
+global-exclude __pycache__
+global-exclude *.py[cod]

@@ -1,0 +1,69 @@
+[build-system]
+requires = ["setuptools>=68", "wheel"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "mindkeep"
+version = "0.2.0"
+description = "Cross-project on-disk memory store for AI coding agents (stdlib-only, SQLite/WAL)."
+readme = "README.md"
+requires-python = ">=3.9"
+license = { text = "MIT" }
+authors = [{ name = "AllenS0104", email = "AllenS0104@users.noreply.github.com" }]
+keywords = ["agent", "memory", "llm", "sqlite"]
+classifiers = [
+    "Development Status :: 3 - Alpha",
+    "Intended Audience :: Developers",
+    "License :: OSI Approved :: MIT License",
+    "Operating System :: OS Independent",
+    "Programming Language :: Python :: 3",
+    "Programming Language :: Python :: 3.9",
+    "Programming Language :: Python :: 3.10",
+    "Programming Language :: Python :: 3.11",
+    "Programming Language :: Python :: 3.12",
+    "Programming Language :: Python :: 3.13",
+    "Topic :: Software Development",
+    "Topic :: Software Development :: Libraries :: Python Modules",
+]
+# Core library: zero runtime dependencies.
+dependencies = []
+
+[project.optional-dependencies]
+dev = [
+    "pytest>=7.4",
+    "pytest-cov>=4.1",
+]
+
+[project.scripts]
+mindkeep = "mindkeep.cli:main"
+
+[project.urls]
+Homepage = "https://github.com/AllenS0104/mindkeep"
+Repository = "https://github.com/AllenS0104/mindkeep"
+Issues = "https://github.com/AllenS0104/mindkeep/issues"
+
+[tool.setuptools.packages.find]
+where = ["src"]
+
+[tool.setuptools.package-data]
+mindkeep = ["py.typed"]
+
+[tool.pytest.ini_options]
+minversion = "7.0"
+testpaths = ["tests"]
+addopts = "-ra --strict-markers"
+markers = [
+    "crash: crash-safety tests that spawn subprocesses and send kill signals",
+    "integration: end-to-end tests that invoke the CLI",
+]
+
+[tool.coverage.run]
+branch = true
+source = ["mindkeep"]
+
+[tool.coverage.report]
+exclude_lines = [
+    "pragma: no cover",
+    "if TYPE_CHECKING:",
+    "raise NotImplementedError",
+]
