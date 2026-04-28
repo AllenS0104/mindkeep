@@ -13,6 +13,7 @@ mindkeep/
 ├── RELEASE-NOTES.md ......... per-release highlights
 └── docs/
     ├── README.md ............ 👈 you are here — portal & nav
+    ├── GETTING-STARTED.md ... single-page install + use + Q&A (start here)
     ├── INSTALL.md ........... 4 ways to install, enterprise & air-gap, doctor
     ├── USAGE.md ............. CLI reference + Python API + 8 cookbook recipes
     ├── UNINSTALL.md ......... backup, remove, PATH cleanup, compliance exit
