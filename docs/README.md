@@ -17,7 +17,8 @@ mindkeep/
     ├── USAGE.md ............. CLI reference + Python API + 8 cookbook recipes
     ├── UNINSTALL.md ......... backup, remove, PATH cleanup, compliance exit
     ├── FAQ.md ............... 22 questions across 5 categories
-    └── TROUBLESHOOTING.md ... 19 symptoms × (symptom / cause / diagnose / fix)
+    ├── TROUBLESHOOTING.md ... 19 symptoms × (symptom / cause / diagnose / fix)
+    └── AUTOLOAD-SETUP.md .... wire mindkeep into Copilot CLI / Claude Code so every session auto-recalls
 ```
 
 ---
