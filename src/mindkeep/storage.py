@@ -13,6 +13,7 @@ Only stdlib is used. Python >= 3.11.
 from __future__ import annotations
 
 import json
+import logging
 import os
 import sqlite3
 import sys
@@ -21,7 +22,9 @@ import time
 from pathlib import Path
 from typing import Any, Iterable, Sequence
 
-SCHEMA_VERSION = 1
+SCHEMA_VERSION = 3
+
+_log = logging.getLogger(__name__)
 
 # Whitelisted tables — we never accept table names from callers unchecked.
 _ALLOWED_TABLES: frozenset[str] = frozenset(
@@ -34,26 +37,32 @@ _ALLOWED_TABLES: frozenset[str] = frozenset(
 _DDL: tuple[str, ...] = (
     """
     CREATE TABLE IF NOT EXISTS meta (
-        id                INTEGER PRIMARY KEY CHECK (id = 1),
-        schema_version    INTEGER NOT NULL,
-        project_id        TEXT    NOT NULL DEFAULT '',
-        display_name      TEXT    NOT NULL DEFAULT '',
-        id_source         TEXT    NOT NULL DEFAULT '',
-        origin_value      TEXT    NOT NULL DEFAULT '',
-        created_at        TEXT    NOT NULL,
-        updated_at        TEXT    NOT NULL
+        id                            INTEGER PRIMARY KEY CHECK (id = 1),
+        schema_version                INTEGER NOT NULL,
+        project_id                    TEXT    NOT NULL DEFAULT '',
+        display_name                  TEXT    NOT NULL DEFAULT '',
+        id_source                     TEXT    NOT NULL DEFAULT '',
+        origin_value                  TEXT    NOT NULL DEFAULT '',
+        access_tracking_started_at    TEXT,
+        created_at                    TEXT    NOT NULL,
+        updated_at                    TEXT    NOT NULL
     )
     """,
     """
     CREATE TABLE IF NOT EXISTS facts (
-        id           INTEGER PRIMARY KEY AUTOINCREMENT,
-        key          TEXT    NOT NULL,
-        value        TEXT    NOT NULL,
-        tags         TEXT    NOT NULL DEFAULT '',
-        source       TEXT    NOT NULL DEFAULT 'agent',
-        confidence   REAL    NOT NULL DEFAULT 1.0,
-        created_at   TEXT    NOT NULL,
-        updated_at   TEXT    NOT NULL,
+        id                INTEGER PRIMARY KEY AUTOINCREMENT,
+        key               TEXT    NOT NULL,
+        value             TEXT    NOT NULL,
+        tags              TEXT    NOT NULL DEFAULT '',
+        source            TEXT    NOT NULL DEFAULT 'agent',
+        confidence        REAL    NOT NULL DEFAULT 1.0,
+        last_accessed_at  TEXT,
+        access_count      INTEGER NOT NULL DEFAULT 0,
+        pin               INTEGER NOT NULL DEFAULT 0,
+        archived_at       TEXT,
+        token_estimate    INTEGER,
+        created_at        TEXT    NOT NULL,
+        updated_at        TEXT    NOT NULL,
         UNIQUE(key)
     )
     """,
@@ -61,18 +70,23 @@ _DDL: tuple[str, ...] = (
     "CREATE INDEX IF NOT EXISTS idx_facts_updated ON facts(updated_at DESC)",
     """
     CREATE TABLE IF NOT EXISTS adrs (
-        id           INTEGER PRIMARY KEY AUTOINCREMENT,
-        number       INTEGER NOT NULL,
-        title        TEXT    NOT NULL,
-        status       TEXT    NOT NULL,
-        context      TEXT    NOT NULL,
-        decision     TEXT    NOT NULL,
-        alternatives TEXT    NOT NULL DEFAULT '',
-        consequences TEXT    NOT NULL DEFAULT '',
-        supersedes   INTEGER,
-        tags         TEXT    NOT NULL DEFAULT '',
-        created_at   TEXT    NOT NULL,
-        updated_at   TEXT    NOT NULL,
+        id                INTEGER PRIMARY KEY AUTOINCREMENT,
+        number            INTEGER NOT NULL,
+        title             TEXT    NOT NULL,
+        status            TEXT    NOT NULL,
+        context           TEXT    NOT NULL,
+        decision          TEXT    NOT NULL,
+        alternatives      TEXT    NOT NULL DEFAULT '',
+        consequences      TEXT    NOT NULL DEFAULT '',
+        supersedes        INTEGER,
+        tags              TEXT    NOT NULL DEFAULT '',
+        last_accessed_at  TEXT,
+        access_count      INTEGER NOT NULL DEFAULT 0,
+        pin               INTEGER NOT NULL DEFAULT 0,
+        archived_at       TEXT,
+        token_estimate    INTEGER,
+        created_at        TEXT    NOT NULL,
+        updated_at        TEXT    NOT NULL,
         UNIQUE(number),
         FOREIGN KEY (supersedes) REFERENCES adrs(id)
     )
@@ -105,6 +119,205 @@ _DDL: tuple[str, ...] = (
     """,
     "CREATE INDEX IF NOT EXISTS idx_prefs_updated ON preferences(updated_at DESC)",
 )
+
+# FTS5 virtual tables + triggers (created on fresh stores and during
+# v1/v2→v3 migration when the SQLite build supports FTS5).
+#
+# Note: FTS column names mirror the source columns (facts.value, adrs.context)
+# rather than the names from the v0.3.0 task spec ("content", "rationale"),
+# so that external-content lookups by FTS5 work without column-name mapping.
+# This is a deviation from the spec; behaviour for MATCH queries is identical.
+_FTS_DDL: tuple[str, ...] = (
+    """
+    CREATE VIRTUAL TABLE IF NOT EXISTS facts_fts USING fts5(
+        value,
+        tags,
+        content=facts,
+        content_rowid=rowid,
+        tokenize='unicode61 remove_diacritics 1'
+    )
+    """,
+    """
+    CREATE VIRTUAL TABLE IF NOT EXISTS adrs_fts USING fts5(
+        title,
+        decision,
+        context,
+        content=adrs,
+        content_rowid=rowid,
+        tokenize='unicode61 remove_diacritics 1'
+    )
+    """,
+    """
+    CREATE TRIGGER IF NOT EXISTS facts_ai AFTER INSERT ON facts BEGIN
+        INSERT INTO facts_fts(rowid, value, tags)
+            VALUES (new.rowid, new.value, new.tags);
+    END
+    """,
+    """
+    CREATE TRIGGER IF NOT EXISTS facts_ad AFTER DELETE ON facts BEGIN
+        INSERT INTO facts_fts(facts_fts, rowid, value, tags)
+            VALUES ('delete', old.rowid, old.value, old.tags);
+    END
+    """,
+    """
+    CREATE TRIGGER IF NOT EXISTS facts_au AFTER UPDATE ON facts BEGIN
+        INSERT INTO facts_fts(facts_fts, rowid, value, tags)
+            VALUES ('delete', old.rowid, old.value, old.tags);
+        INSERT INTO facts_fts(rowid, value, tags)
+            VALUES (new.rowid, new.value, new.tags);
+    END
+    """,
+    """
+    CREATE TRIGGER IF NOT EXISTS adrs_ai AFTER INSERT ON adrs BEGIN
+        INSERT INTO adrs_fts(rowid, title, decision, context)
+            VALUES (new.rowid, new.title, new.decision, new.context);
+    END
+    """,
+    """
+    CREATE TRIGGER IF NOT EXISTS adrs_ad AFTER DELETE ON adrs BEGIN
+        INSERT INTO adrs_fts(adrs_fts, rowid, title, decision, context)
+            VALUES ('delete', old.rowid, old.title, old.decision, old.context);
+    END
+    """,
+    """
+    CREATE TRIGGER IF NOT EXISTS adrs_au AFTER UPDATE ON adrs BEGIN
+        INSERT INTO adrs_fts(adrs_fts, rowid, title, decision, context)
+            VALUES ('delete', old.rowid, old.title, old.decision, old.context);
+        INSERT INTO adrs_fts(rowid, title, decision, context)
+            VALUES (new.rowid, new.title, new.decision, new.context);
+    END
+    """,
+)
+
+
+def fts5_available() -> bool:
+    """Return True iff the running SQLite build can create FTS5 tables.
+
+    Implemented as a probe (CREATE VIRTUAL TABLE … USING fts5) on a throwaway
+    in-memory connection. Used both by the migration (to skip FTS creation
+    cleanly on FTS5-less builds) and by ``mindkeep doctor``.
+    """
+    try:
+        c = sqlite3.connect(":memory:")
+    except sqlite3.Error:
+        return False
+    try:
+        try:
+            c.execute("CREATE VIRTUAL TABLE _probe USING fts5(x)")
+            return True
+        except sqlite3.OperationalError:
+            return False
+    finally:
+        c.close()
+
+
+def _table_columns(conn: sqlite3.Connection, table: str) -> set[str]:
+    return {r[1] for r in conn.execute(f"PRAGMA table_info({table})").fetchall()}
+
+
+# Per-table column additions introduced in v3. Idempotent: we only ALTER
+# what's actually missing, so re-running the migration on a v3 store is a
+# no-op.
+_V3_COLUMNS: dict[str, tuple[tuple[str, str], ...]] = {
+    "facts": (
+        ("last_accessed_at", "TEXT"),
+        ("access_count", "INTEGER NOT NULL DEFAULT 0"),
+        ("pin", "INTEGER NOT NULL DEFAULT 0"),
+        ("archived_at", "TEXT"),
+        ("token_estimate", "INTEGER"),
+    ),
+    "adrs": (
+        ("last_accessed_at", "TEXT"),
+        ("access_count", "INTEGER NOT NULL DEFAULT 0"),
+        ("pin", "INTEGER NOT NULL DEFAULT 0"),
+        ("archived_at", "TEXT"),
+        ("token_estimate", "INTEGER"),
+    ),
+    "meta": (
+        ("access_tracking_started_at", "TEXT"),
+    ),
+}
+
+
+def _populate_fts(conn: sqlite3.Connection) -> None:
+    """Backfill FTS rows from existing facts/adrs (idempotent)."""
+    fts_count = conn.execute(
+        "SELECT COUNT(*) FROM facts_fts"
+    ).fetchone()[0]
+    if fts_count == 0:
+        conn.execute(
+            "INSERT INTO facts_fts(rowid, value, tags) "
+            "SELECT rowid, value, tags FROM facts"
+        )
+    fts_count = conn.execute(
+        "SELECT COUNT(*) FROM adrs_fts"
+    ).fetchone()[0]
+    if fts_count == 0:
+        conn.execute(
+            "INSERT INTO adrs_fts(rowid, title, decision, context) "
+            "SELECT rowid, title, decision, context FROM adrs"
+        )
+
+
+def migrate_to_v3(
+    conn: sqlite3.Connection,
+    *,
+    fts_available: bool | None = None,
+) -> None:
+    """Idempotently bring a store up to schema v3.
+
+    Adds the salience columns (``last_accessed_at``, ``access_count``,
+    ``pin``, ``archived_at``, ``token_estimate``) to ``facts`` and ``adrs``,
+    plus ``access_tracking_started_at`` to ``meta``. Creates the
+    ``facts_fts``/``adrs_fts`` virtual tables and their sync triggers when
+    FTS5 is compiled in; logs a warning and skips otherwise. Backfills FTS
+    rows for any pre-existing content. Stamps ``schema_version = 3`` and
+    seeds ``access_tracking_started_at`` so future GC can distinguish rows
+    that pre-date access tracking from genuinely stale rows.
+
+    Safe to run on an already-v3 store: every step is a guarded
+    ``ADD COLUMN``/``CREATE … IF NOT EXISTS``/``UPDATE`` and the FTS
+    backfill skips when the FTS table is non-empty.
+    """
+    if fts_available is None:
+        fts_available = fts5_available()
+
+    conn.execute("BEGIN")
+    try:
+        for table, cols in _V3_COLUMNS.items():
+            existing = _table_columns(conn, table)
+            for name, decl in cols:
+                if name not in existing:
+                    conn.execute(
+                        f"ALTER TABLE {table} ADD COLUMN {name} {decl}"
+                    )
+
+        if fts_available:
+            for stmt in _FTS_DDL:
+                conn.execute(stmt)
+            _populate_fts(conn)
+        else:
+            _log.warning(
+                "SQLite build lacks FTS5 (ENABLE_FTS5 not in compile options); "
+                "skipping facts_fts/adrs_fts creation. Salience columns are "
+                "still present, but full-text search will be unavailable until "
+                "the user reinstalls a SQLite/Python with FTS5 enabled."
+            )
+
+        # Seed access_tracking_started_at exactly once: only if NULL.
+        conn.execute(
+            "UPDATE meta SET access_tracking_started_at = ? "
+            "WHERE id = 1 AND access_tracking_started_at IS NULL",
+            (_now_iso(),),
+        )
+        conn.execute(
+            "UPDATE meta SET schema_version = ?, updated_at = ? WHERE id = 1",
+            (SCHEMA_VERSION, _now_iso()),
+        )
+        conn.execute("COMMIT")
+    except Exception:
+        conn.execute("ROLLBACK")
+        raise
 
 
 def default_data_dir() -> Path:
@@ -191,14 +404,18 @@ class Storage:
                 now = _now_iso()
                 self._conn.execute(
                     "INSERT OR IGNORE INTO meta "
-                    "(id, schema_version, project_id, created_at, updated_at) "
-                    "VALUES (1, ?, ?, ?, ?)",
-                    (SCHEMA_VERSION, project_hash, now, now),
+                    "(id, schema_version, project_id, "
+                    "access_tracking_started_at, created_at, updated_at) "
+                    "VALUES (1, ?, ?, ?, ?, ?)",
+                    (SCHEMA_VERSION, project_hash, now, now, now),
                 )
             self._conn.execute("COMMIT")
         except Exception:
             self._conn.execute("ROLLBACK")
             raise
+
+        # Bring legacy stores up to current schema. Idempotent on v3.
+        migrate_to_v3(self._conn)
 
         # Cache per-table allowed columns (P0-1 — column-name whitelist).
         # Populated from PRAGMA table_info; used to reject caller-supplied
