@@ -1,6 +1,8 @@
 # 🧠 mindkeep
 
-[![Release](https://img.shields.io/github/v/release/AllenS0104/mindkeep?label=release&color=brightgreen)](https://github.com/AllenS0104/mindkeep/releases/latest) [![License](https://img.shields.io/badge/license-MIT-blue.svg)](./LICENSE) [![Python](https://img.shields.io/badge/python-%E2%89%A53.9-blue.svg)](https://www.python.org/) [![Tests](https://img.shields.io/badge/tests-159%20passed-brightgreen.svg)](https://github.com/AllenS0104/mindkeep/actions) [![Platform](https://img.shields.io/badge/platform-win%20%7C%20mac%20%7C%20linux-lightgrey.svg)](./docs/INSTALL.md) [![Zero deps](https://img.shields.io/badge/runtime%20deps-0-success.svg)](./pyproject.toml)
+[![PyPI](https://img.shields.io/pypi/v/mindkeep?color=brightgreen&label=pypi)](https://pypi.org/project/mindkeep/) [![Release](https://img.shields.io/github/v/release/AllenS0104/mindkeep?label=release&color=brightgreen)](https://github.com/AllenS0104/mindkeep/releases/latest) [![License](https://img.shields.io/badge/license-MIT-blue.svg)](./LICENSE) [![Python](https://img.shields.io/badge/python-%E2%89%A53.9-blue.svg)](https://www.python.org/) [![Tests](https://img.shields.io/badge/tests-159%20passed-brightgreen.svg)](https://github.com/AllenS0104/mindkeep/actions) [![Platform](https://img.shields.io/badge/platform-win%20%7C%20mac%20%7C%20linux-lightgrey.svg)](./docs/INSTALL.md) [![Zero deps](https://img.shields.io/badge/runtime%20deps-0-success.svg)](./pyproject.toml)
+
+> **Install:** `pipx install mindkeep` (or `pip install mindkeep`) · See [Getting Started](./docs/GETTING-STARTED.md) · 中文版 [快速上手](./docs/GETTING-STARTED.zh.md)
 
 > **Crash-safe, per-project long-term memory for AI coding agents.**
 > Zero runtime dependencies · SQLite + WAL · Python ≥ 3.9 · MIT
@@ -59,7 +61,17 @@ Get-FileHash -Algorithm SHA256 .\install.ps1
 
 ## 🚀 Quickstart
 
-### Option A · One-shot install (recommended)
+### Option A · PyPI (recommended)
+
+```bash
+pipx install mindkeep        # preferred — isolated venv, on PATH
+# or, if you don't have pipx:
+pip install --user mindkeep
+```
+
+That's it. `mindkeep` is a stdlib-only Python package — no compilation, no native deps.
+
+### Option B · One-shot installer (auto-bootstraps pipx + PATH)
 
 **Windows (PowerShell):**
 ```powershell
@@ -71,18 +83,13 @@ iwr https://raw.githubusercontent.com/AllenS0104/mindkeep/main/install.ps1 | iex
 curl -fsSL https://raw.githubusercontent.com/AllenS0104/mindkeep/main/install.sh | bash
 ```
 
-The installer checks Python ≥ 3.9, installs `pipx` if missing, adds the
-scripts dir to your `PATH`, and runs `mindkeep doctor` so you know it works.
+The installer checks Python ≥ 3.9, installs `pipx` if missing, runs
+`pipx install mindkeep`, ensures `pipx`'s bin dir is on your `PATH`,
+and runs `mindkeep doctor` so you know it works.
 
-### Option B · Manual via pipx
+### Option C · Offline / air-gapped wheel
 
-```bash
-pipx install git+https://github.com/AllenS0104/mindkeep.git
-```
-
-### Option C · Offline wheel
-
-Grab the `.whl` from the [Releases page](https://github.com/AllenS0104/mindkeep/releases):
+Grab the `.whl` + `SHA256SUMS` from the [Releases page](https://github.com/AllenS0104/mindkeep/releases):
 
 ```bash
 pip install --user ./mindkeep-0.2.0-py3-none-any.whl
