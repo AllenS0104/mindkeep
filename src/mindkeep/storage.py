@@ -396,26 +396,10 @@ class Storage:
         )
         self._conn.row_factory = sqlite3.Row
         self._apply_pragmas()
-        self._conn.execute("BEGIN")
-        try:
-            for stmt in _DDL:
-                self._conn.execute(stmt)
-            if is_new:
-                now = _now_iso()
-                self._conn.execute(
-                    "INSERT OR IGNORE INTO meta "
-                    "(id, schema_version, project_id, "
-                    "access_tracking_started_at, created_at, updated_at) "
-                    "VALUES (1, ?, ?, ?, ?, ?)",
-                    (SCHEMA_VERSION, project_hash, now, now, now),
-                )
-            self._conn.execute("COMMIT")
-        except Exception:
-            self._conn.execute("ROLLBACK")
-            raise
+        self._init_schema_with_retry(is_new, project_hash)
 
         # Bring legacy stores up to current schema. Idempotent on v3.
-        migrate_to_v3(self._conn)
+        self._run_with_retry(lambda: migrate_to_v3(self._conn))
 
         # Cache per-table allowed columns (P0-1 — column-name whitelist).
         # Populated from PRAGMA table_info; used to reject caller-supplied
@@ -428,13 +412,90 @@ class Storage:
             self._allowed_columns[tbl] = frozenset(r["name"] for r in rows)
 
     # ───────────────────────── internals ─────────────────────────
+    @staticmethod
+    def _is_locked_error(exc: BaseException) -> bool:
+        if not isinstance(exc, sqlite3.OperationalError):
+            return False
+        msg = str(exc).lower()
+        return "locked" in msg or "busy" in msg
+
+    def _run_with_retry(self, fn, timeout: float = 10.0) -> Any:
+        """Run *fn* and retry while SQLite reports the database is locked.
+
+        Concurrent first-time openers race on the schema-init transaction
+        and the v3 migration; SQLite's busy handler does not always cover
+        those code paths reliably, so we add an explicit retry envelope.
+        """
+        deadline = time.monotonic() + timeout
+        delay = 0.01
+        while True:
+            try:
+                return fn()
+            except sqlite3.OperationalError as exc:
+                if not self._is_locked_error(exc):
+                    raise
+                if time.monotonic() >= deadline:
+                    raise
+                time.sleep(delay)
+                delay = min(delay * 2, 0.2)
+
+    def _init_schema_with_retry(self, is_new: bool, project_hash: str) -> None:
+        def _do() -> None:
+            self._conn.execute("BEGIN IMMEDIATE")
+            try:
+                for stmt in _DDL:
+                    self._conn.execute(stmt)
+                if is_new:
+                    now = _now_iso()
+                    self._conn.execute(
+                        "INSERT OR IGNORE INTO meta "
+                        "(id, schema_version, project_id, "
+                        "access_tracking_started_at, created_at, updated_at) "
+                        "VALUES (1, ?, ?, ?, ?, ?)",
+                        (SCHEMA_VERSION, project_hash, now, now, now),
+                    )
+                self._conn.execute("COMMIT")
+            except Exception:
+                try:
+                    self._conn.execute("ROLLBACK")
+                except sqlite3.OperationalError:
+                    pass
+                raise
+
+        self._run_with_retry(_do)
+
     def _apply_pragmas(self) -> None:
         cur = self._conn.cursor()
-        cur.execute("PRAGMA journal_mode=WAL")
+        # busy_timeout MUST be set first: subsequent statements (including
+        # PRAGMA journal_mode=WAL, BEGIN, DDL, migrate) need a non-zero
+        # busy timeout to survive concurrent openers.
+        cur.execute("PRAGMA busy_timeout=5000")
+
+        # PRAGMA journal_mode=WAL briefly takes an exclusive lock and SQLite
+        # does *not* invoke the busy handler for that switch — concurrent
+        # openers see immediate SQLITE_BUSY. Skip the switch if the DB is
+        # already in WAL (it's a persistent setting), and retry with backoff
+        # otherwise so simultaneous first-openers don't crash each other.
+        current = cur.execute("PRAGMA journal_mode").fetchone()
+        current_mode = (current[0] if current else "").lower()
+        if current_mode != "wal":
+            deadline = time.monotonic() + 5.0
+            delay = 0.01
+            while True:
+                try:
+                    cur.execute("PRAGMA journal_mode=WAL")
+                    break
+                except sqlite3.OperationalError as exc:
+                    if "locked" not in str(exc) and "busy" not in str(exc):
+                        raise
+                    if time.monotonic() >= deadline:
+                        raise
+                    time.sleep(delay)
+                    delay = min(delay * 2, 0.2)
+
         cur.execute("PRAGMA synchronous=NORMAL")
         cur.execute("PRAGMA wal_autocheckpoint=1000")
         cur.execute("PRAGMA foreign_keys=ON")
-        cur.execute("PRAGMA busy_timeout=5000")
         cur.execute("PRAGMA temp_store=MEMORY")
         cur.close()
 
