@@ -31,10 +31,17 @@ Design notes
 * ``clear()``. ``Storage.delete`` refuses filter-less deletes, so we iterate
   rows and delete by primary key. This is O(n) but fine for the expected
   dataset size (≤ 10⁴ rows) and avoids bypassing the storage abstraction.
+* Write guard (P1-7). Every ``add_fact`` / ``add_adr`` call estimates token
+  count after redaction and rejects writes whose post-redaction text exceeds
+  a per-kind cap (facts: 100, ADRs: 1500; both env-overridable). A second
+  threshold at 2× cap rejects huge pre-redaction blobs outright. Pass
+  ``force=True`` to bypass.
 """
 from __future__ import annotations
 
 import json
+import os
+import sys
 import threading
 import uuid
 from datetime import datetime, timezone
@@ -43,7 +50,16 @@ from typing import Any, Protocol, Sequence, runtime_checkable
 
 from .models import ProjectId
 from .project_id import resolve_project_id
-from .storage import Storage, default_data_dir
+from .storage import Storage, WriteGuardError, default_data_dir
+
+# Token estimator — prefer the shared helper from #7 when it lands; fall
+# back to a 4-chars-per-token heuristic so this module is self-contained
+# until the sibling agent's ``_tokens`` module ships.
+try:  # pragma: no cover - exercised once #7 lands
+    from ._tokens import estimate as _estimate_tokens
+except ImportError:  # pragma: no cover - default path today
+    def _estimate_tokens(s: str) -> int:  # TODO(#7): replace with shared helper
+        return max(1, len(s) // 4) if s else 0
 
 # ──────────────────────────── filter protocol ────────────────────────────
 
@@ -115,6 +131,97 @@ def _tags_from_str(raw: str) -> list[str]:
     if not raw:
         return []
     return [t for t in raw.split(",") if t]
+
+
+# ─────────────────────────── write-guard helpers (P1-7) ───────────────────────────
+
+# Default token caps; overridable via env vars. Resolved per-call so tests
+# that ``monkeypatch.setenv`` see fresh values without re-importing.
+_DEFAULT_CAPS: dict[str, int] = {"fact": 100, "adr": 1500}
+_CAP_ENV: dict[str, str] = {
+    "fact": "MINDKEEP_FACTS_TOKEN_CAP",
+    "adr": "MINDKEEP_ADRS_TOKEN_CAP",
+}
+
+
+def _resolve_cap(kind: str) -> int:
+    raw = os.environ.get(_CAP_ENV[kind])
+    if raw:
+        try:
+            v = int(raw)
+            if v > 0:
+                return v
+        except ValueError:
+            pass
+    return _DEFAULT_CAPS[kind]
+
+
+def _enforce_write_guard(
+    kind: str,
+    *,
+    pre: str,
+    post: str,
+    force: bool,
+) -> int:
+    """Apply the dual-threshold guard. Returns the post-redaction token estimate.
+
+    * Estimates tokens of both ``pre`` (pre-redaction) and ``post``
+      (post-redaction) text.
+    * Raises :class:`WriteGuardError` if ``post`` exceeds the cap, or if
+      ``pre`` exceeds 2× cap (the "huge unstructured blob" guard).
+    * Logs a stderr warning when redaction shrank the content by >50%
+      *and* the original was substantial (signals a nearly-secrets-only
+      payload — still allowed).
+    * ``force=True`` bypasses both rejections (warnings still print).
+    """
+    cap = _resolve_cap(kind)
+    pre_tokens = _estimate_tokens(pre)
+    post_tokens = _estimate_tokens(post)
+
+    plural = "facts" if kind == "fact" else "adrs"
+
+    if not force:
+        if pre_tokens > 2 * cap:
+            raise WriteGuardError(
+                f"{plural} pre-redaction content is {pre_tokens} tokens, "
+                f"exceeding 2× the {plural} cap ({2 * cap}); refusing to "
+                f"accept what looks like a large unstructured blob. "
+                f"Pass force=True to override.",
+                kind=kind,
+                cap=cap,
+                post_tokens=post_tokens,
+                pre_tokens=pre_tokens,
+            )
+        if post_tokens > cap:
+            raise WriteGuardError(
+                f"{plural} post-redaction content is {post_tokens} tokens, "
+                f"exceeding the {plural} cap ({cap}). Trim the input or "
+                f"pass force=True to override.",
+                kind=kind,
+                cap=cap,
+                post_tokens=post_tokens,
+                pre_tokens=pre_tokens,
+            )
+
+    # Shrinkage warning — only when redaction actually removed content
+    # and the original was substantial (otherwise a 250-token blob of
+    # pure secrets that redacts to ~10 tokens is just "redaction did its
+    # job" and the warning would be noise). The threshold is half the
+    # cap: at that point the reduction is large in absolute terms too.
+    if (
+        pre_tokens > cap // 2
+        and post_tokens < pre_tokens
+        and post_tokens <= cap
+        and (pre_tokens - post_tokens) * 2 > pre_tokens
+    ):
+        print(
+            f"mindkeep: redaction trimmed {kind} from "
+            f"{pre_tokens} → {post_tokens} tokens (>50% reduction); "
+            f"consider re-checking the input for accidentally-pasted secrets.",
+            file=sys.stderr,
+        )
+
+    return post_tokens
 
 
 # ──────────────────────────── MemoryStore ────────────────────────────
@@ -231,9 +338,19 @@ class MemoryStore:
         content: str,
         tags: list[str] | None = None,
         source: str | None = None,
+        *,
+        force: bool = False,
     ) -> int:
-        """Persist a free-form fact; returns the new rowid."""
+        """Persist a free-form fact; returns the new rowid.
+
+        Pass ``force=True`` to bypass the post-redaction token cap
+        (default 100, override via ``MINDKEEP_FACTS_TOKEN_CAP``).
+        """
+        original = content
         content = self._run_filters("fact", "content", content)
+        token_estimate = _enforce_write_guard(
+            "fact", pre=original, post=content, force=force
+        )
         now = _now_iso()
         # Synthetic UNIQUE key — the minimal API treats facts as an append-only
         # log keyed by content rather than a natural key space.
@@ -246,6 +363,7 @@ class MemoryStore:
                 "tags": _tags_to_str(tags),
                 "source": source if source is not None else "agent",
                 "confidence": 1.0,
+                "token_estimate": token_estimate,
                 "created_at": now,
                 "updated_at": now,
             },
@@ -271,6 +389,8 @@ class MemoryStore:
         status: str = "accepted",
         supersedes: int | None = None,
         tags: list[str] | None = None,
+        *,
+        force: bool = False,
     ) -> int:
         """Record an Architecture Decision; returns the new rowid.
 
@@ -280,9 +400,24 @@ class MemoryStore:
         The read-max / insert sequence is serialised per-store with an
         ``RLock`` so concurrent callers never observe the same
         ``max(number)`` and land on duplicate numbers (P1-1).
+
+        Pass ``force=True`` to bypass the post-redaction token cap
+        (default 1500, override via ``MINDKEEP_ADRS_TOKEN_CAP``). The cap
+        is checked against the combined ``title + decision + rationale``
+        text — the same body a downstream consumer would render.
         """
+        original_decision = decision
+        original_rationale = rationale
         decision = self._run_filters("adr", "decision", decision)
         rationale = self._run_filters("adr", "rationale", rationale)
+        # Combine into the body the cap actually applies to. ``title`` is
+        # not redacted (no field hook in the legacy pipeline) so it
+        # contributes equally to both pre- and post-redaction estimates.
+        pre_body = f"{title}\n\n{original_decision}\n\n{original_rationale}"
+        post_body = f"{title}\n\n{decision}\n\n{rationale}"
+        token_estimate = _enforce_write_guard(
+            "adr", pre=pre_body, post=post_body, force=force
+        )
         now = _now_iso()
         with self._adr_lock:
             existing = self._storage.query("adrs")
@@ -299,6 +434,7 @@ class MemoryStore:
                     "consequences": "",
                     "supersedes": supersedes,
                     "tags": _tags_to_str(tags),
+                    "token_estimate": token_estimate,
                     "created_at": now,
                     "updated_at": now,
                 },
