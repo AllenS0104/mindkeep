@@ -1,5 +1,7 @@
 # Getting Started with mindkeep
 
+> 🌐 **Languages**: **English** · [中文](GETTING-STARTED.zh.md)
+
 A single-page, end-to-end guide: **Install → Use → Troubleshoot**. If you've used `agent-memory` before, mindkeep is its rebrand at v0.2.0; the API is identical except for renames.
 
 > Looking for deeper material? See [`INSTALL.md`](INSTALL.md) (4 install methods + air-gap), [`USAGE.md`](USAGE.md) (full CLI/API reference + 8 cookbook recipes), [`FAQ.md`](FAQ.md), [`TROUBLESHOOTING.md`](TROUBLESHOOTING.md), and [`AUTOLOAD-SETUP.md`](AUTOLOAD-SETUP.md).
