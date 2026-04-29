@@ -29,7 +29,7 @@ from typing import Any, Sequence
 from .memory_api import MemoryStore
 from .models import ProjectId
 from .project_id import resolve_project_id
-from .storage import Storage, default_data_dir
+from .storage import SCHEMA_VERSION, Storage, default_data_dir
 
 __all__ = ["main"]
 
@@ -399,7 +399,7 @@ def _cmd_export(data_dir: Path, args: argparse.Namespace) -> int:
     ps = _open_pref_storage(data_dir)
     try:
         payload = {
-            "meta": {"project_hash": ph, "schema_version": 1,
+            "meta": {"project_hash": ph, "schema_version": SCHEMA_VERSION,
                      "meta_row": _meta_row(s)},
             "facts": s.query("facts"),
             "adrs": s.query("adrs"),
