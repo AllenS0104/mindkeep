@@ -108,12 +108,14 @@ def test_add_adr_auto_numbers_and_supersedes(store: MemoryStore) -> None:
     assert a2 > a1
 
     adrs = store.list_adrs()
-    assert [a["number"] for a in adrs] == [1, 2]
-    assert adrs[0]["title"] == "choose sqlite"
-    assert adrs[1]["supersedes"] == a1
+    # Default ordering is `pin DESC, created_at DESC` (P1-8); both ADRs
+    # are unpinned and a2 is newer, so it surfaces first.
+    assert [a["number"] for a in adrs] == [2, 1]
+    assert adrs[1]["title"] == "choose sqlite"
+    assert adrs[0]["supersedes"] == a1
     # rationale is persisted as context.
-    assert adrs[1]["context"] == "perf"
-    assert adrs[1]["decision"] == "enable WAL"
+    assert adrs[0]["context"] == "perf"
+    assert adrs[0]["decision"] == "enable WAL"
 
 
 def test_list_adrs_filter_by_status(store: MemoryStore) -> None:

@@ -258,6 +258,7 @@ def _show_kind(
     storage: Storage, kind: str, tag: str | None, limit: int,
     pref_storage: Storage | None = None,
     full: bool = False,
+    pinned_only: bool = False,
 ) -> None:
     # In ``--full`` mode, large free-text columns render raw (newlines
     # preserved, no width cap). Alignment is sacrificed; see PRD-ux-polish.
@@ -272,15 +273,26 @@ def _show_kind(
     else:
         rows = storage.query(table)
 
+    if pinned_only and kind in ("facts", "adrs"):
+        rows = [r for r in rows if int(r.get("pin") or 0) == 1]
+
     if kind == "facts":
-        rows.sort(key=lambda r: r.get("updated_at", ""), reverse=True)
+        rows.sort(
+            key=lambda r: (
+                int(r.get("pin") or 0),
+                r.get("created_at", ""),
+                int(r.get("id") or 0),
+            ),
+            reverse=True,
+        )
         if tag:
             rows = [r for r in rows if tag in _tags_list(r.get("tags", ""))]
         rows = rows[: max(0, limit)]
-        headers = ["id", "key", "value", "tags", "updated_at"]
+        headers = ["id", "pin", "key", "value", "tags", "updated_at"]
         data = [
             [
                 str(r["id"]),
+                "*" if int(r.get("pin") or 0) == 1 else "",
                 _trunc(r.get("key", "")),
                 _cell(r.get("value", "")),
                 _trunc(r.get("tags", "")),
@@ -289,14 +301,22 @@ def _show_kind(
             for r in rows
         ]
     elif kind == "adrs":
-        rows.sort(key=lambda r: int(r.get("number", 0)))
+        rows.sort(
+            key=lambda r: (
+                int(r.get("pin") or 0),
+                r.get("created_at", ""),
+                int(r.get("id") or 0),
+            ),
+            reverse=True,
+        )
         if tag:
             rows = [r for r in rows if tag in _tags_list(r.get("tags", ""))]
         rows = rows[: max(0, limit)]
-        headers = ["number", "title", "status", "decision", "tags", "updated_at"]
+        headers = ["number", "pin", "title", "status", "decision", "tags", "updated_at"]
         data = [
             [
                 str(r.get("number", "")),
+                "*" if int(r.get("pin") or 0) == 1 else "",
                 _trunc(r.get("title", "")),
                 _trunc(r.get("status", ""), 16),
                 _cell(r.get("decision", "")),
@@ -355,7 +375,8 @@ def _cmd_show(data_dir: Path, args: argparse.Namespace) -> int:
         print(f"project: {ph}")
         for kind in kinds:
             _show_kind(s, kind, args.tag, args.limit,
-                       pref_storage=ps, full=full)
+                       pref_storage=ps, full=full,
+                       pinned_only=bool(getattr(args, "pinned", False)))
     finally:
         sys.stdout = real_stdout
         s.close()
@@ -416,6 +437,37 @@ def _cmd_clear(data_dir: Path, args: argparse.Namespace) -> int:
     finally:
         store.close()
     print(f"cleared {total} rows from {ph}")
+    return 0
+
+
+# ───────────────────────── command: pin / unpin ─────────────────────────
+
+
+_PIN_KIND_TABLE: dict[str, str] = {"fact": "facts", "adr": "adrs"}
+
+
+def _cmd_pin(data_dir: Path, args: argparse.Namespace, *, value: int) -> int:
+    """Set or clear ``pin`` on a single fact or ADR row (P1-8)."""
+    ph = _resolve_project_hash(data_dir, args.project)
+    table = _PIN_KIND_TABLE[args.kind]
+    s = _open_storage(data_dir, ph)
+    try:
+        from datetime import datetime, timezone
+        now = datetime.now(timezone.utc).isoformat(timespec="seconds")
+        n = s.update(
+            table,
+            where={"id": int(args.id)},
+            values={"pin": value, "updated_at": now},
+        )
+    finally:
+        s.close()
+    if n == 0:
+        verb = "pin" if value else "unpin"
+        print(f"error: cannot {verb}: {args.kind} id {args.id} not found in {ph}",
+              file=sys.stderr)
+        return 2
+    state = "pinned" if value else "unpinned"
+    print(f"{state} {args.kind} {args.id} in {ph}")
     return 0
 
 
@@ -818,6 +870,10 @@ def _build_parser() -> argparse.ArgumentParser:
     ps.add_argument("--tag", default=None)
     ps.add_argument("--limit", type=int, default=20)
     ps.add_argument(
+        "--pinned", action="store_true",
+        help="only show pinned facts/ADRs (P1-8)",
+    )
+    ps.add_argument(
         "--full", "--no-truncate",
         dest="full", action="store_true",
         help="print full values without the default ~52-char truncation "
@@ -832,6 +888,16 @@ def _build_parser() -> argparse.ArgumentParser:
     )
     pc.add_argument("--yes", action="store_true",
                     help="skip confirmation prompt")
+
+    for verb, helptext in (("pin",   "pin a fact or ADR so it surfaces first"),
+                           ("unpin", "remove the pinned flag from a fact or ADR")):
+        pp = sub.add_parser(verb, help=helptext)
+        pp.add_argument("--project", default=None,
+                        help="project hash or display_name (default: current cwd)")
+        pp.add_argument("kind", choices=["fact", "adr"], metavar="<kind>",
+                        help="row type: fact | adr")
+        pp.add_argument("id", type=int, metavar="<id>",
+                        help="row id (from `mindkeep show`)")
 
     pe = sub.add_parser("export", help="dump a project to JSON")
     pe.add_argument("--project", default=None)
@@ -891,6 +957,10 @@ def main(argv: list[str] | None = None) -> int:
             return _cmd_show(data_dir, args)
         if args.cmd == "clear":
             return _cmd_clear(data_dir, args)
+        if args.cmd == "pin":
+            return _cmd_pin(data_dir, args, value=1)
+        if args.cmd == "unpin":
+            return _cmd_pin(data_dir, args, value=0)
         if args.cmd == "export":
             return _cmd_export(data_dir, args)
         if args.cmd == "import":

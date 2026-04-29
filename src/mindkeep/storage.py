@@ -652,6 +652,39 @@ class Storage:
             self._conn.commit()
             return int(rowid)
 
+    def update(
+        self,
+        table: str,
+        *,
+        where: dict[str, Any],
+        values: dict[str, Any],
+    ) -> int:
+        """Equality-match UPDATE; returns number of rows affected.
+
+        Both ``where`` and ``values`` must be non-empty mappings. Column
+        names are validated against the cached schema whitelist.
+        """
+        self._check_table(table)
+        if not values:
+            raise ValueError("values must be a non-empty mapping")
+        if not where:
+            raise ValueError(
+                "update() requires at least one where filter; "
+                "refusing to overwrite a whole table"
+            )
+        self._check_columns(table, values.keys())
+        self._check_columns(table, where.keys())
+        set_clause = ", ".join(f"{k} = ?" for k in values)
+        where_clause = " AND ".join(f"{k} = ?" for k in where)
+        sql = f"UPDATE {table} SET {set_clause} WHERE {where_clause}"
+        with self._lock:
+            self._ensure_open()
+            cur = self._conn.execute(
+                sql, tuple(values.values()) + tuple(where.values())
+            )
+            self._conn.commit()
+            return cur.rowcount
+
     def query(self, table: str, **filters: Any) -> list[dict[str, Any]]:
         """Equality-match query; returns list of row dicts."""
         self._check_table(table)
