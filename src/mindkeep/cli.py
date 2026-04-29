@@ -26,6 +26,7 @@ import sys
 from pathlib import Path
 from typing import Any, Sequence
 
+from . import _session
 from .memory_api import MemoryStore
 from .models import ProjectId
 from .project_id import resolve_project_id
@@ -341,19 +342,47 @@ def _show_kind(
 
 
 def _cmd_show(data_dir: Path, args: argparse.Namespace) -> int:
+    import io
     ph = _resolve_project_hash(data_dir, args.project)
     kinds = _ALL_KINDS if args.kind == "all" else (args.kind,)
     full = bool(getattr(args, "full", False) or getattr(args, "no_truncate", False))
     s = _open_storage(data_dir, ph)
     ps = _open_pref_storage(data_dir)
+    buf = io.StringIO()
+    real_stdout = sys.stdout
     try:
+        sys.stdout = buf
         print(f"project: {ph}")
         for kind in kinds:
             _show_kind(s, kind, args.tag, args.limit,
                        pref_storage=ps, full=full)
     finally:
+        sys.stdout = real_stdout
         s.close()
         ps.close()
+    rendered = buf.getvalue()
+    _session.emit_or_suppress(rendered.rstrip("\n"))
+    return 0
+
+
+def _cmd_session(args: argparse.Namespace) -> int:
+    sub = getattr(args, "session_cmd", None)
+    if sub == "reset":
+        removed = _session.reset()
+        path = _session.state_path()
+        if removed:
+            print(f"reset session state: {path}")
+        else:
+            print(f"no session state to reset (looked at {path})")
+        return 0
+    # default: status
+    st = _session.status()
+    print(f"path:       {st['path']}")
+    print(f"budget:     {st['budget']}  (env MINDKEEP_SESSION_BUDGET)")
+    print(f"spent:      {st['spent']}")
+    print(f"calls:      {st['calls']}")
+    print(f"started_at: {st['started_at']}")
+    print(f"last_call:  {st['last_call']}")
     return 0
 
 
@@ -838,6 +867,14 @@ def _build_parser() -> argparse.ArgumentParser:
     pu.add_argument("--yes", "-y", action="store_true",
                     help="skip interactive confirmation")
 
+    psess = sub.add_parser(
+        "session",
+        help="inspect or reset the per-shell token budget state",
+    )
+    psess_sub = psess.add_subparsers(dest="session_cmd", metavar="<subcommand>")
+    psess_sub.add_parser("status", help="print current session spend (default)")
+    psess_sub.add_parser("reset", help="delete the current session state file")
+
     return p
 
 
@@ -864,6 +901,8 @@ def main(argv: list[str] | None = None) -> int:
             return _cmd_doctor(data_dir)
         if args.cmd == "upgrade":
             return _cmd_upgrade(args)
+        if args.cmd == "session":
+            return _cmd_session(args)
     except _ProjectNotFound as exc:
         # User asked for a project that doesn't exist → user error.
         print(f"error: {exc}", file=sys.stderr)
