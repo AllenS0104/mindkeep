@@ -340,11 +340,14 @@ class MemoryStore:
         source: str | None = None,
         *,
         force: bool = False,
+        pin: bool = False,
     ) -> int:
         """Persist a free-form fact; returns the new rowid.
 
         Pass ``force=True`` to bypass the post-redaction token cap
         (default 100, override via ``MINDKEEP_FACTS_TOKEN_CAP``).
+        ``pin=True`` marks the fact so it surfaces first in
+        :meth:`list_facts` (P1-8 / issue #13).
         """
         original = content
         content = self._run_filters("fact", "content", content)
@@ -364,20 +367,57 @@ class MemoryStore:
                 "source": source if source is not None else "agent",
                 "confidence": 1.0,
                 "token_estimate": token_estimate,
+                "pin": 1 if pin else 0,
                 "created_at": now,
                 "updated_at": now,
             },
         )
 
     def list_facts(
-        self, tag: str | None = None, limit: int = 100
+        self,
+        tag: str | None = None,
+        limit: int = 100,
+        *,
+        pinned_only: bool = False,
     ) -> list[dict[str, Any]]:
-        """Return facts (newest first), optionally filtered by tag."""
+        """Return facts ordered ``pin DESC, created_at DESC`` (P1-8).
+
+        * ``tag``         — keep only rows whose tag list contains ``tag``.
+        * ``limit``       — cap on returned rows.
+        * ``pinned_only`` — return only rows with ``pin = 1``.
+        """
         rows = self._storage.query("facts")
-        rows.sort(key=lambda r: r["updated_at"], reverse=True)
+        if pinned_only:
+            rows = [r for r in rows if int(r.get("pin") or 0) == 1]
+        rows.sort(
+            key=lambda r: (
+                int(r.get("pin") or 0),
+                r.get("created_at", ""),
+                int(r.get("id") or 0),
+            ),
+            reverse=True,
+        )
         if tag is not None:
             rows = [r for r in rows if tag in _tags_from_str(r["tags"])]
         return rows[: max(0, int(limit))]
+
+    def pin_fact(self, fact_id: int) -> None:
+        """Set ``pin = 1`` on the fact with id ``fact_id`` (P1-8)."""
+        self._set_pin("facts", int(fact_id), 1)
+
+    def unpin_fact(self, fact_id: int) -> None:
+        """Clear ``pin`` on the fact with id ``fact_id`` (P1-8)."""
+        self._set_pin("facts", int(fact_id), 0)
+
+    def _set_pin(self, table: str, row_id: int, value: int) -> None:
+        n = self._storage.update(
+            table,
+            where={"id": row_id},
+            values={"pin": value, "updated_at": _now_iso()},
+        )
+        if n == 0:
+            kind = "fact" if table == "facts" else "adr"
+            raise ValueError(f"{kind} id {row_id} not found")
 
     # ---- ADRs --------------------------------------------------------
 
@@ -391,11 +431,15 @@ class MemoryStore:
         tags: list[str] | None = None,
         *,
         force: bool = False,
+        pin: bool = False,
     ) -> int:
         """Record an Architecture Decision; returns the new rowid.
 
         The ADR ``number`` is auto-assigned as ``max(number) + 1``.
         ``rationale`` is stored in the schema's ``context`` column.
+
+        ``pin=True`` marks the ADR so it surfaces first in
+        :meth:`list_adrs` (P1-8 / issue #13).
 
         The read-max / insert sequence is serialised per-store with an
         ``RLock`` so concurrent callers never observe the same
@@ -435,19 +479,46 @@ class MemoryStore:
                     "supersedes": supersedes,
                     "tags": _tags_to_str(tags),
                     "token_estimate": token_estimate,
+                    "pin": 1 if pin else 0,
                     "created_at": now,
                     "updated_at": now,
                 },
             )
 
-    def list_adrs(self, status: str | None = None) -> list[dict[str, Any]]:
-        """Return ADRs sorted by ``number`` ascending."""
+    def list_adrs(
+        self,
+        status: str | None = None,
+        *,
+        pinned_only: bool = False,
+    ) -> list[dict[str, Any]]:
+        """Return ADRs ordered ``pin DESC, created_at DESC`` (P1-8).
+
+        * ``status``      — equality-filter on the ADR status column.
+        * ``pinned_only`` — return only rows with ``pin = 1``.
+        """
         if status is not None:
             rows = self._storage.query("adrs", status=status)
         else:
             rows = self._storage.query("adrs")
-        rows.sort(key=lambda r: int(r["number"]))
+        if pinned_only:
+            rows = [r for r in rows if int(r.get("pin") or 0) == 1]
+        rows.sort(
+            key=lambda r: (
+                int(r.get("pin") or 0),
+                r.get("created_at", ""),
+                int(r.get("id") or 0),
+            ),
+            reverse=True,
+        )
         return rows
+
+    def pin_adr(self, adr_id: int) -> None:
+        """Set ``pin = 1`` on the ADR with id ``adr_id`` (P1-8)."""
+        self._set_pin("adrs", int(adr_id), 1)
+
+    def unpin_adr(self, adr_id: int) -> None:
+        """Clear ``pin`` on the ADR with id ``adr_id`` (P1-8)."""
+        self._set_pin("adrs", int(adr_id), 0)
 
     # ---- preferences (upsert, cross-project) -------------------------
 
