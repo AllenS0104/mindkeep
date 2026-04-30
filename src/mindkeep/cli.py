@@ -27,6 +27,7 @@ from pathlib import Path
 from typing import Any, Sequence
 
 from . import _session
+from ._tokens import estimate as _estimate_tokens
 from .memory_api import MemoryStore
 from .models import ProjectId
 from .project_id import resolve_project_id
@@ -254,11 +255,35 @@ def _tags_list(raw: str) -> list[str]:
     return [t for t in (raw or "").split(",") if t]
 
 
+class _BudgetTracker:
+    """Track remaining token budget across rendered rows for ``mindkeep show``.
+
+    ``remaining is None`` means unlimited (no ``--budget`` flag was passed).
+    """
+
+    __slots__ = ("remaining",)
+
+    def __init__(self, total: int | None) -> None:
+        self.remaining: int | None = total
+
+    def try_spend(self, text: str) -> bool:
+        """Deduct tokens for *text* if it fits. Return True if accepted."""
+        if self.remaining is None:
+            return True
+        cost = _estimate_tokens(text)
+        if cost > self.remaining:
+            return False
+        self.remaining -= cost
+        return True
+
+
 def _show_kind(
     storage: Storage, kind: str, tag: str | None, limit: int,
     pref_storage: Storage | None = None,
     full: bool = False,
     pinned_only: bool = False,
+    top: int | None = None,
+    budget: _BudgetTracker | None = None,
 ) -> None:
     # In ``--full`` mode, large free-text columns render raw (newlines
     # preserved, no width cap). Alignment is sacrificed; see PRD-ux-polish.
@@ -353,11 +378,25 @@ def _show_kind(
             for r in rows
         ]
 
+    if top is not None:
+        data = data[: max(0, top)]
+
     print(f"== {kind} ==")
     if not data:
         print("(no rows)")
     else:
-        print(_render_table(headers, data))
+        rendered = _render_table(headers, data).split("\n")
+        header_line, sep_line, *row_lines = rendered
+        kept: list[str] = []
+        for line in row_lines:
+            if budget is not None:
+                if not budget.try_spend(line):
+                    break
+            kept.append(line)
+        if not kept:
+            print("(no rows)")
+        else:
+            print("\n".join([header_line, sep_line, *kept]))
     print()
 
 
@@ -370,13 +409,17 @@ def _cmd_show(data_dir: Path, args: argparse.Namespace) -> int:
     ps = _open_pref_storage(data_dir)
     buf = io.StringIO()
     real_stdout = sys.stdout
+    top = getattr(args, "top", None)
+    budget_total = getattr(args, "budget", None)
+    tracker = _BudgetTracker(budget_total) if budget_total is not None else None
     try:
         sys.stdout = buf
         print(f"project: {ph}")
         for kind in kinds:
             _show_kind(s, kind, args.tag, args.limit,
                        pref_storage=ps, full=full,
-                       pinned_only=bool(getattr(args, "pinned", False)))
+                       pinned_only=bool(getattr(args, "pinned", False)),
+                       top=top, budget=tracker)
     finally:
         sys.stdout = real_stdout
         s.close()
@@ -1254,6 +1297,15 @@ def _build_parser() -> argparse.ArgumentParser:
     )
     ps.add_argument("--tag", default=None)
     ps.add_argument("--limit", type=int, default=20)
+    ps.add_argument(
+        "--top", type=int, default=None,
+        help="cap rows per kind (in addition to --limit); default unlimited (P0-3)",
+    )
+    ps.add_argument(
+        "--budget", type=int, default=None,
+        help="cap cumulative rendered token count across all rows shown; "
+             "default unlimited (P0-3)",
+    )
     ps.add_argument(
         "--pinned", action="store_true",
         help="only show pinned facts/ADRs (P1-8)",
