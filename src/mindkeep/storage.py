@@ -345,6 +345,38 @@ def _now_iso() -> str:
     return time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime())
 
 
+class StorageError(Exception):
+    """Base class for mindkeep storage-layer errors."""
+
+
+class WriteGuardError(StorageError):
+    """Raised when content exceeds the configured token cap (P1-7).
+
+    Carries structured fields so callers can render friendly messages or
+    decide whether to retry with ``force=True``:
+
+    * ``kind`` — ``"fact"`` or ``"adr"``.
+    * ``cap`` — the per-kind token cap that was enforced.
+    * ``post_tokens`` — token estimate of the content **after** redaction.
+    * ``pre_tokens``  — token estimate of the original (pre-redaction) content.
+    """
+
+    def __init__(
+        self,
+        message: str,
+        *,
+        kind: str,
+        cap: int,
+        post_tokens: int,
+        pre_tokens: int,
+    ) -> None:
+        super().__init__(message)
+        self.kind = kind
+        self.cap = cap
+        self.post_tokens = post_tokens
+        self.pre_tokens = pre_tokens
+
+
 def _atomic_write_bytes(path: Path, data: bytes) -> None:
     tmp = path.with_suffix(path.suffix + f".tmp.{os.getpid()}")
     with open(tmp, "wb") as fh:
