@@ -41,9 +41,11 @@ from __future__ import annotations
 
 import json
 import os
+import re
 import sys
 import threading
 import uuid
+from dataclasses import asdict, dataclass, field
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any, Protocol, Sequence, runtime_checkable
@@ -131,6 +133,65 @@ def _tags_from_str(raw: str) -> list[str]:
     if not raw:
         return []
     return [t for t in raw.split(",") if t]
+
+
+# ─────────────────────── recall result + query helpers (P0-4) ───────────────────────
+
+
+@dataclass(frozen=True)
+class RecallHit:
+    """One search result from :meth:`MemoryStore.recall`.
+
+    * ``kind``    — ``"fact"`` or ``"adr"``.
+    * ``id``      — primary key in the source table.
+    * ``score``   — raw bm25 (negative-magnitude); **lower is better**.
+    * ``snippet`` — FTS5 ``snippet()`` excerpt with ``[...]`` highlights.
+    * ``tags``    — decoded tag list (empty if the row had no tags).
+    * ``value``   — full source text (facts: ``value``; adrs: ``title``).
+    * ``extra``   — per-kind side-channel fields (e.g. ADR number/status).
+    """
+
+    kind: str
+    id: int
+    score: float
+    snippet: str
+    tags: list[str]
+    value: str
+    extra: dict[str, Any] = field(default_factory=dict)
+
+    def to_dict(self) -> dict[str, Any]:
+        """Return a plain ``dict`` — convenient for JSON serialisation."""
+        return asdict(self)
+
+
+# FTS5 syntax characters that, when present unescaped, indicate the user
+# intends an explicit FTS5 expression (operators, column filters, prefixes,
+# explicit phrases). Anything *not* containing one of these gets wrapped in
+# a phrase quote so punctuation in plain text (".", "/", "-", ":") cannot
+# be misread by the FTS5 parser.
+#
+# Reference: https://sqlite.org/fts5.html#full_text_query_syntax
+_FTS5_OPERATOR_TOKENS = re.compile(
+    r'(?:"|\*|\(|\)|:|\^|\bAND\b|\bOR\b|\bNOT\b|\bNEAR\b)'
+)
+
+
+def _prepare_fts_query(q: str) -> str:
+    """Make ``q`` safe to feed into ``... MATCH ?``.
+
+    If ``q`` already contains FTS5 syntax (operators, quotes, column
+    qualifiers, prefix wildcards, parentheses) we trust it and pass it
+    through. Otherwise we wrap it in a single phrase quote so that
+    incidental punctuation — bare hyphens, dots, slashes, CJK — never
+    triggers the FTS5 parser.
+
+    Inside a phrase quote, the only character that needs escaping is
+    ``"`` itself (FTS5 doubles it).
+    """
+    s = q.strip()
+    if _FTS5_OPERATOR_TOKENS.search(s):
+        return s
+    return '"' + s.replace('"', '""') + '"'
 
 
 # ─────────────────────────── write-guard helpers (P1-7) ───────────────────────────
@@ -684,6 +745,86 @@ class MemoryStore:
     def __exit__(self, exc_type, exc, tb) -> None:
         self.close()
 
+    # ---- full-text recall (P0-4, #9) -------------------------------
+    def recall(
+        self,
+        query: str,
+        *,
+        top: int = 10,
+        kind: str = "all",
+    ) -> list["RecallHit"]:
+        """Full-text search across facts and ADRs (FTS5 + bm25 ranking).
+
+        Parameters
+        ----------
+        query:
+            User-supplied search string. Passed verbatim to FTS5 ``MATCH``
+            after light syntactic protection (see :func:`_prepare_fts_query`):
+            inputs that look like an FTS5 expression go through unchanged;
+            anything else is wrapped in a phrase quote so punctuation,
+            CJK runs, and bare hyphens cannot trip the FTS5 parser.
+        top:
+            Maximum number of hits returned across both kinds (default 10).
+        kind:
+            ``"all"`` (default), ``"facts"``, or ``"adrs"``.
+
+        Returns
+        -------
+        list[RecallHit]
+            Ordered ascending by bm25 score (lower = better, canonical
+            FTS5 semantics). Empty when *query* is blank or there are no
+            matches. Score and snippet come straight from SQLite.
+        """
+        if self._closed:
+            raise RuntimeError("MemoryStore is closed")
+        if kind not in ("all", "facts", "adrs"):
+            raise ValueError(
+                f"unknown kind {kind!r}; allowed: 'all' | 'facts' | 'adrs'"
+            )
+        q = (query or "").strip()
+        if not q:
+            return []
+        prepared = _prepare_fts_query(q)
+        # Pull `top` from each side, merge, then trim — guarantees the
+        # global top-N across kinds even when one side dominates.
+        per_kind = max(1, int(top))
+        hits: list[RecallHit] = []
+        if kind in ("all", "facts"):
+            for r in self._storage.recall_facts(prepared, limit=per_kind):
+                hits.append(
+                    RecallHit(
+                        kind="fact",
+                        id=int(r.get("id", 0)),
+                        score=float(r.get("score", 0.0)),
+                        snippet=str(r.get("snippet", "") or ""),
+                        tags=_tags_from_str(r.get("tags") or ""),
+                        value=str(r.get("value", "") or ""),
+                    )
+                )
+        if kind in ("all", "adrs"):
+            for r in self._storage.recall_adrs(prepared, limit=per_kind):
+                # For ADRs, ``value`` carries the title (the closest
+                # single-line summary); ``decision`` lives in extra so
+                # JSON consumers can introspect if they need to.
+                hits.append(
+                    RecallHit(
+                        kind="adr",
+                        id=int(r.get("id", 0)),
+                        score=float(r.get("score", 0.0)),
+                        snippet=str(r.get("snippet", "") or ""),
+                        tags=_tags_from_str(r.get("tags") or ""),
+                        value=str(r.get("title", "") or ""),
+                        extra={
+                            "number": int(r.get("number", 0)),
+                            "status": str(r.get("status", "") or ""),
+                            "decision": str(r.get("decision", "") or ""),
+                        },
+                    )
+                )
+        # Lower bm25 == better; sort ascending and trim to top.
+        hits.sort(key=lambda h: (h.score, h.kind, h.id))
+        return hits[: max(0, int(top))]
+
     # ---- friendly aliases -----------------------------------
     # Identical to the add_*/list_* methods above — same signatures,
     # same return types, same behavior. Provided so agent-facing code
@@ -694,4 +835,4 @@ class MemoryStore:
     recall_adrs = list_adrs
 
 
-__all__ = ["MemoryStore", "Filter"]
+__all__ = ["MemoryStore", "Filter", "RecallHit"]

@@ -877,6 +877,72 @@ class Storage:
                 "newest_fact_at": newest_fact_at,
             }
 
+    # ───────────────────────── full-text recall (P0-4, #9) ─────────────────────────
+    def _fts_available(self) -> bool:
+        """Return True iff facts_fts/adrs_fts virtual tables exist."""
+        try:
+            row = self._conn.execute(
+                "SELECT COUNT(*) AS n FROM sqlite_master "
+                "WHERE type = 'table' AND name IN ('facts_fts', 'adrs_fts')"
+            ).fetchone()
+        except sqlite3.Error:
+            return False
+        return bool(row and int(row["n"]) >= 2)
+
+    def recall_facts(
+        self, query: str, limit: int = 10
+    ) -> list[dict[str, Any]]:
+        """Run an FTS5 MATCH on ``facts_fts`` and return ranked rows.
+
+        Each result dict carries the source ``facts`` columns joined with
+        the bm25-derived ``score`` and an FTS5 ``snippet`` highlighting the
+        first match. Rows are ordered ascending by ``score`` (lower bm25
+        means better — canonical FTS5 semantics).
+
+        Returns an empty list if FTS5 is unavailable or the query is empty.
+        """
+        if not query or not query.strip() or not self._fts_available():
+            return []
+        sql = (
+            "SELECT facts.*, "
+            "       bm25(facts_fts) AS score, "
+            "       snippet(facts_fts, -1, '[', ']', '...', 16) AS snippet "
+            "FROM facts_fts "
+            "JOIN facts ON facts.rowid = facts_fts.rowid "
+            "WHERE facts_fts MATCH ? "
+            "ORDER BY score ASC "
+            "LIMIT ?"
+        )
+        with self._lock:
+            self._ensure_open()
+            rows = self._conn.execute(sql, (query, int(limit))).fetchall()
+            return [dict(r) for r in rows]
+
+    def recall_adrs(
+        self, query: str, limit: int = 10
+    ) -> list[dict[str, Any]]:
+        """Run an FTS5 MATCH on ``adrs_fts`` and return ranked rows.
+
+        Mirrors :meth:`recall_facts`: ascending bm25, FTS5 snippet across
+        all indexed columns (title/decision/context).
+        """
+        if not query or not query.strip() or not self._fts_available():
+            return []
+        sql = (
+            "SELECT adrs.*, "
+            "       bm25(adrs_fts) AS score, "
+            "       snippet(adrs_fts, -1, '[', ']', '...', 16) AS snippet "
+            "FROM adrs_fts "
+            "JOIN adrs ON adrs.rowid = adrs_fts.rowid "
+            "WHERE adrs_fts MATCH ? "
+            "ORDER BY score ASC "
+            "LIMIT ?"
+        )
+        with self._lock:
+            self._ensure_open()
+            rows = self._conn.execute(sql, (query, int(limit))).fetchall()
+            return [dict(r) for r in rows]
+
     def commit(self) -> None:
         with self._lock:
             self._ensure_open()

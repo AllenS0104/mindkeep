@@ -1183,6 +1183,68 @@ def _cmd_upgrade(args: argparse.Namespace) -> int:
     return 0
 
 
+def _cmd_recall(data_dir: Path, args: argparse.Namespace) -> int:
+    """Full-text search across facts and ADRs (P0-4, #9).
+
+    Honors the session budget via the same StringIO-buffering pattern as
+    ``_cmd_show``: render the entire output first, then feed it through
+    ``_session.emit_or_suppress`` so a single call cannot quietly half-print.
+    """
+    import io
+
+    from .memory_api import MemoryStore
+
+    raw_query = args.query or ""
+    if not raw_query.strip():
+        print(
+            "error: recall requires a non-empty query",
+            file=sys.stderr,
+        )
+        return 2
+
+    ph = _resolve_project_hash(data_dir, args.project)
+    pid = ProjectId(id=ph, source="cli", origin="recall", display_name="")
+    storage = _open_storage(data_dir, ph)
+    pref_storage = _open_pref_storage(data_dir)
+    store = MemoryStore(pid, storage, pref_storage=pref_storage)
+    try:
+        hits = store.recall(raw_query, top=args.top, kind=args.kind)
+    finally:
+        store.close()
+
+    if getattr(args, "json", False):
+        payload = [h.to_dict() for h in hits]
+        rendered = json.dumps(payload, indent=2, ensure_ascii=False)
+        _session.emit_or_suppress(rendered)
+        return 0
+
+    if not hits:
+        _session.emit_or_suppress("No results.")
+        return 0
+
+    buf = io.StringIO()
+    buf.write(
+        f"recall: {len(hits)} hit(s) for {raw_query!r} "
+        f"(lower bm25 = better match)\n"
+    )
+    headers = ["#", "kind", "id", "score", "tags", "snippet"]
+    rows: list[list[str]] = []
+    for i, h in enumerate(hits, 1):
+        rows.append(
+            [
+                str(i),
+                h.kind,
+                str(h.id),
+                f"{h.score:.3f}",
+                _trunc(",".join(h.tags), 24),
+                _trunc(h.snippet, 80),
+            ]
+        )
+    buf.write(_render_table(headers, rows))
+    _session.emit_or_suppress(buf.getvalue().rstrip("\n"))
+    return 0
+
+
 def _cmd_stats(data_dir: Path, args: argparse.Namespace) -> int:
     """Print per-project store stats (human or JSON)."""
     ph = _resolve_project_hash(data_dir, args.project)
@@ -1361,6 +1423,23 @@ def _build_parser() -> argparse.ArgumentParser:
     pst.add_argument("--json", action="store_true",
                      help="emit machine-readable JSON instead of the human format")
 
+    pr = sub.add_parser(
+        "recall",
+        help="full-text search across facts and adrs (FTS5 + bm25)",
+    )
+    pr.add_argument("query", metavar="<query>",
+                    help="search string; wrapped as a phrase unless it contains "
+                         "FTS5 operators (AND/OR/NOT/NEAR, quotes, *, :, ^, parens)")
+    pr.add_argument("--project", default=None,
+                    help="project hash or display_name (default: current cwd)")
+    pr.add_argument("--top", type=int, default=10,
+                    help="maximum number of hits to return (default: 10)")
+    pr.add_argument("--kind", default="all",
+                    choices=["facts", "adrs", "all"],
+                    help="restrict search to one kind (default: all)")
+    pr.add_argument("--json", action="store_true",
+                    help="emit machine-readable JSON instead of the human format")
+
     pu = sub.add_parser(
         "upgrade",
         help="pull the latest mindkeep (pip/pipx auto-detected)",
@@ -1416,6 +1495,8 @@ def main(argv: list[str] | None = None) -> int:
             return _cmd_doctor(data_dir, args)
         if args.cmd == "stats":
             return _cmd_stats(data_dir, args)
+        if args.cmd == "recall":
+            return _cmd_recall(data_dir, args)
         if args.cmd == "upgrade":
             return _cmd_upgrade(args)
         if args.cmd == "session":
