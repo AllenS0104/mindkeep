@@ -848,6 +848,99 @@ def _cmd_upgrade(args: argparse.Namespace) -> int:
     return 0
 
 
+def _cmd_stats(data_dir: Path, args: argparse.Namespace) -> int:
+    """Print per-project store stats (human or JSON)."""
+    ph = _resolve_project_hash(data_dir, args.project)
+    s = _open_storage(data_dir, ph)
+    ps = _open_pref_storage(data_dir)
+    try:
+        data = s.stats()
+        prefs_total = ps.query("preferences")
+    finally:
+        s.close()
+        ps.close()
+    data["data_dir"] = str(data_dir)
+    data["preferences"] = {"total": len(prefs_total)}
+
+    # Optional session-budget integration (P0-2 sibling).
+    budget_block: dict[str, Any] | None = None
+    try:
+        from ._session import current_state  # type: ignore[attr-defined]
+        st = current_state()
+        if st is not None:
+            budget_block = {
+                "active": bool(st.get("active", True)),
+                "budget": st.get("budget"),
+                "spent": st.get("spent"),
+                "calls": st.get("calls"),
+            }
+    except Exception:
+        budget_block = None
+    data["session_budget"] = budget_block
+
+    if getattr(args, "json", False):
+        ordered = {
+            "schema_version": data["schema_version"],
+            "project_id": data["project_id"],
+            "data_dir": data["data_dir"],
+            "db_size_bytes": data["db_size_bytes"],
+            "facts": data["facts"],
+            "adrs": data["adrs"],
+            "preferences": data["preferences"],
+            "sessions": data["sessions"],
+            "top_tags": data["top_tags"],
+            "tokens_estimated_total": data["tokens_estimated_total"],
+            "oldest_fact_at": data["oldest_fact_at"],
+            "newest_fact_at": data["newest_fact_at"],
+            "session_budget": data["session_budget"],
+        }
+        print(json.dumps(ordered, indent=2, sort_keys=False))
+        return 0
+
+    label_w = 20
+    print(f"mindkeep store · project={ph} · path={data_dir}")
+    print("─" * 60)
+
+    def _line(label: str, value: str) -> None:
+        print(f"{label.ljust(label_w)}{value}")
+
+    _line("Schema version:", str(data["schema_version"]))
+    f = data["facts"]
+    _line(
+        "Facts:",
+        f"{f['total']}  (pinned: {f['pinned']}, archived: {f['archived']})",
+    )
+    a = data["adrs"]
+    _line(
+        "ADRs:",
+        f"{a['total']}  (pinned: {a['pinned']}, archived: {a['archived']})",
+    )
+    _line("Preferences:", str(data["preferences"]["total"]))
+    _line("Sessions:", str(data["sessions"]["total"]))
+    if data["top_tags"]:
+        tags_str = ", ".join(
+            f"{t['tag']} ({t['count']})" for t in data["top_tags"]
+        )
+    else:
+        tags_str = "(none)"
+    _line("Top tags:", tags_str)
+    _line("Total tokens (est):", str(data["tokens_estimated_total"]))
+    _line("DB file size:", _fmt_size(data["db_size_bytes"]))
+    _line("Oldest fact:", data["oldest_fact_at"] or "(none)")
+    _line("Newest fact:", data["newest_fact_at"] or "(none)")
+    if budget_block is None:
+        _line("Session budget:", "not active")
+    else:
+        _line("Session budget:", "active")
+        spent = budget_block.get("spent")
+        budget = budget_block.get("budget")
+        calls = budget_block.get("calls")
+        print(
+            f"{''.ljust(label_w)}spent={spent} budget={budget} calls={calls}"
+        )
+    return 0
+
+
 def _build_parser() -> argparse.ArgumentParser:
     p = argparse.ArgumentParser(
         prog="mindkeep",
@@ -916,6 +1009,12 @@ def _build_parser() -> argparse.ArgumentParser:
 
     sub.add_parser("doctor", help="run environment health checks")
 
+    pst = sub.add_parser("stats", help="print introspection stats for a project")
+    pst.add_argument("--project", default=None,
+                     help="project hash or display_name (default: current cwd)")
+    pst.add_argument("--json", action="store_true",
+                     help="emit machine-readable JSON instead of the human format")
+
     pu = sub.add_parser(
         "upgrade",
         help="pull the latest mindkeep (pip/pipx auto-detected)",
@@ -969,6 +1068,8 @@ def main(argv: list[str] | None = None) -> int:
             return _cmd_where(data_dir)
         if args.cmd == "doctor":
             return _cmd_doctor(data_dir)
+        if args.cmd == "stats":
+            return _cmd_stats(data_dir, args)
         if args.cmd == "upgrade":
             return _cmd_upgrade(args)
         if args.cmd == "session":

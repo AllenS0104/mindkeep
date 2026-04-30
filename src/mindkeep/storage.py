@@ -377,6 +377,33 @@ class WriteGuardError(StorageError):
         self.pre_tokens = pre_tokens
 
 
+def _estimate_tokens(s: str) -> int:
+    """Cheap, deterministic token estimate.
+
+    Prefers sibling ``mindkeep._tokens.estimate`` if present (P0-2 work);
+    otherwise: count CJK / Hangul characters as 1 token each, the
+    remainder via ``len // 4``. Returns 0 for empty strings.
+    """
+    if not s:
+        return 0
+    try:
+        from ._tokens import estimate as _ext  # type: ignore[attr-defined]
+        return int(_ext(s))
+    except Exception:
+        pass
+    cjk = 0
+    for ch in s:
+        cp = ord(ch)
+        if (
+            0x4E00 <= cp <= 0x9FFF
+            or 0x3040 <= cp <= 0x30FF
+            or 0xAC00 <= cp <= 0xD7AF
+        ):
+            cjk += 1
+    other = len(s) - cjk
+    return cjk + (other // 4 if other else 0)
+
+
 def _atomic_write_bytes(path: Path, data: bytes) -> None:
     tmp = path.with_suffix(path.suffix + f".tmp.{os.getpid()}")
     with open(tmp, "wb") as fh:
@@ -748,6 +775,107 @@ class Storage:
             self._ensure_open()
             self._conn.execute(sql, tuple(updates.values()))
             self._conn.commit()
+
+    def stats(self) -> dict[str, Any]:
+        """Return aggregate stats for this storage's DB.
+
+        Used by ``mindkeep stats``. Counts facts/adrs/sessions, computes
+        pinned/archived breakdowns, top tags (across facts+adrs), token
+        totals (lazily filled when ``token_estimate`` is NULL), and the
+        oldest/newest fact timestamps. Preferences are *not* counted here —
+        they live in a separate cross-project storage.
+        """
+        with self._lock:
+            self._ensure_open()
+            cur = self._conn
+
+            def _kind_counts(table: str) -> dict[str, int]:
+                row = cur.execute(
+                    f"SELECT COUNT(*) AS n, "
+                    f"COALESCE(SUM(CASE WHEN pin = 1 THEN 1 ELSE 0 END), 0) AS p, "
+                    f"COALESCE(SUM(CASE WHEN archived_at IS NOT NULL THEN 1 ELSE 0 END), 0) AS a "
+                    f"FROM {table}"
+                ).fetchone()
+                return {
+                    "total": int(row["n"]),
+                    "pinned": int(row["p"]),
+                    "archived": int(row["a"]),
+                }
+
+            facts = _kind_counts("facts")
+            adrs = _kind_counts("adrs")
+
+            sess_n = cur.execute(
+                "SELECT COUNT(*) AS n FROM session_summaries"
+            ).fetchone()["n"]
+
+            row = cur.execute(
+                "SELECT MIN(created_at) AS lo, MAX(created_at) AS hi FROM facts"
+            ).fetchone()
+            oldest_fact_at = row["lo"] if row and row["lo"] else None
+            newest_fact_at = row["hi"] if row and row["hi"] else None
+
+            tag_counts: dict[str, int] = {}
+            for tbl in ("facts", "adrs"):
+                for r in cur.execute(
+                    f"SELECT tags FROM {tbl} WHERE tags IS NOT NULL AND tags != ''"
+                ).fetchall():
+                    for tag in (r["tags"] or "").split(","):
+                        tag = tag.strip()
+                        if tag:
+                            tag_counts[tag] = tag_counts.get(tag, 0) + 1
+            top_tags = sorted(
+                tag_counts.items(), key=lambda kv: (-kv[1], kv[0])
+            )[:5]
+
+            tokens_total = 0
+            for r in cur.execute(
+                "SELECT token_estimate, value FROM facts"
+            ).fetchall():
+                est = r["token_estimate"]
+                tokens_total += int(est) if est is not None else _estimate_tokens(
+                    r["value"] or ""
+                )
+            for r in cur.execute(
+                "SELECT token_estimate, title, context, decision FROM adrs"
+            ).fetchall():
+                est = r["token_estimate"]
+                if est is not None:
+                    tokens_total += int(est)
+                else:
+                    tokens_total += _estimate_tokens(
+                        " ".join(
+                            x or "" for x in (r["title"], r["context"], r["decision"])
+                        )
+                    )
+
+            schema_version = SCHEMA_VERSION
+            try:
+                mr = cur.execute(
+                    "SELECT schema_version FROM meta WHERE id = 1"
+                ).fetchone()
+                if mr is not None:
+                    schema_version = int(mr["schema_version"])
+            except sqlite3.Error:
+                pass
+
+            try:
+                db_size = self._db_path.stat().st_size
+            except OSError:
+                db_size = 0
+
+            return {
+                "schema_version": schema_version,
+                "project_id": self._project_hash,
+                "db_size_bytes": int(db_size),
+                "facts": facts,
+                "adrs": adrs,
+                "sessions": {"total": int(sess_n)},
+                "top_tags": [{"tag": t, "count": c} for t, c in top_tags],
+                "tokens_estimated_total": int(tokens_total),
+                "oldest_fact_at": oldest_fact_at,
+                "newest_fact_at": newest_fact_at,
+            }
 
     def commit(self) -> None:
         with self._lock:
