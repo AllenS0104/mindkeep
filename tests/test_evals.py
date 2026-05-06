@@ -47,7 +47,7 @@ def test_corpus_loads_with_expected_counts() -> None:
 
 def test_run_all_scenarios_pass() -> None:
     results = run_all()
-    assert len(results) == 8
+    assert len(results) == 9
     for r in results:
         assert isinstance(r, EvalResult)
         assert r.passed, f"scenario {r.name} failed: metric={r.metric} threshold={r.threshold} details={r.details}"
@@ -83,7 +83,7 @@ def test_runner_main_writes_report_and_exits_zero(tmp_path: Path) -> None:
     assert report_path.exists()
     payload = json.loads(report_path.read_text(encoding="utf-8"))
     assert payload["summary"]["failed"] == 0
-    assert payload["summary"]["total"] == 8
+    assert payload["summary"]["total"] == 9
 
 
 def test_python_dash_m_entry_point(tmp_path: Path) -> None:
@@ -151,3 +151,91 @@ def test_markdown_summary_contains_all_scenarios() -> None:
     assert "mindkeep eval report" in md
     for sc in report["scenarios"]:
         assert sc["name"] in md
+
+
+def test_e9_can_fail_when_term_dense_fact_absent(tmp_path: Path) -> None:
+    """Guard test: E9 must actually fail if the term-dense fact is removed.
+
+    The whole point of E9 is to catch a bm25 regression. If we strip the
+    fact that *should* win on term frequency, the scenario should not be
+    able to lie about success — it must report ``passed=False``.
+    """
+    from mindkeep.evals.scenarios import scenario_e9_bm25_term_density
+    from mindkeep.memory_api import MemoryStore
+
+    # Pre-seed the e9 paths with ONLY the sparse fact, so when the
+    # scenario inserts its own dense+sparse pair, the dense fact still
+    # wins and the scenario passes — that's the healthy case. Then we
+    # need to also assert the *unhealthy* case: monkeypatch the
+    # scenario's tmp paths to a store where dense was never inserted.
+    cwd = tmp_path / "e9_proj"
+    data_dir = tmp_path / "e9_data"
+    cwd.mkdir(parents=True, exist_ok=True)
+    data_dir.mkdir(parents=True, exist_ok=True)
+
+    rare_term = "snorklewhomp"
+    sparse = (
+        "General indexing notes: this row mentions "
+        f"{rare_term} once but is mostly about unrelated metadata, "
+        "schemas, migrations, and varied filler text used as a length "
+        "control so bm25 length-normalisation has something to compare."
+    )
+    decoy_dense_other_term = (
+        "alpha alpha alpha alpha alpha tokens that do not match the rare term."
+    )
+
+    store = MemoryStore.open(cwd=cwd, data_dir=data_dir)
+    try:
+        sparse_id = store.add_fact(sparse, tags=["sparse"])
+        store.add_fact(decoy_dense_other_term, tags=["decoy"])
+        store.commit()
+        # Sanity: top-1 for the rare term is the sparse fact (only match).
+        hits = store.recall(rare_term, top=5)
+        assert hits, "sparse fact must match the rare term"
+        assert hits[0].id == sparse_id
+    finally:
+        store.close()
+
+    # Now simulate "dense fact missing" by running the scenario against a
+    # tmp_root where we have already created e9_proj/e9_data with ONLY
+    # the sparse fact pre-loaded — but the scenario re-opens the store
+    # and *adds its own* dense+sparse pair, so this path actually still
+    # passes. To get a true negative we instead patch ``MemoryStore.add_fact``
+    # so that the dense insert is silently dropped.
+    from mindkeep.evals import scenarios as scen_mod
+
+    real_open = scen_mod.MemoryStore.open
+
+    class _DropDenseStore:
+        def __init__(self, inner):
+            self._inner = inner
+
+        def add_fact(self, content, tags=None, pin=False, force=False):
+            # Drop facts whose content starts with the rare term (the dense one).
+            if isinstance(content, str) and content.startswith(rare_term + " indexes"):
+                return -1
+            return self._inner.add_fact(content, tags=tags or [], pin=pin, force=force)
+
+        def commit(self):
+            return self._inner.commit()
+
+        def recall(self, *a, **kw):
+            return self._inner.recall(*a, **kw)
+
+        def close(self):
+            return self._inner.close()
+
+    def _patched_open(*a, **kw):
+        return _DropDenseStore(real_open(*a, **kw))
+
+    scen_mod.MemoryStore.open = staticmethod(_patched_open)  # type: ignore[attr-defined]
+    try:
+        result = scenario_e9_bm25_term_density(tmp_path / "e9_negative")
+    finally:
+        scen_mod.MemoryStore.open = real_open  # type: ignore[attr-defined]
+
+    assert result.passed is False, (
+        "E9 must fail when the term-dense fact is missing; otherwise the "
+        "scenario cannot catch a real bm25 regression. "
+        f"got metric={result.metric} details={result.details}"
+    )
