@@ -1245,6 +1245,40 @@ def _cmd_recall(data_dir: Path, args: argparse.Namespace) -> int:
     return 0
 
 
+def _cmd_integrate(args: argparse.Namespace) -> int:
+    from . import _integrations
+
+    if getattr(args, "list", False):
+        for name in _integrations.supported():
+            print(name)
+        return 0
+
+    target = args.target
+    if target is None or target not in _integrations.TARGETS:
+        supported = ", ".join(_integrations.supported())
+        print(f"error: unknown target: {target!r}", file=sys.stderr)
+        print(f"supported targets: {supported}", file=sys.stderr)
+        return 2
+
+    snippet = _integrations.render(target)
+
+    out = getattr(args, "out", None)
+    if out:
+        out_path = Path(out)
+        if out_path.exists() and not getattr(args, "force", False):
+            print(
+                f"error: refusing to overwrite {out_path} (pass --force to overwrite)",
+                file=sys.stderr,
+            )
+            return 1
+        out_path.parent.mkdir(parents=True, exist_ok=True)
+        out_path.write_text(snippet, encoding="utf-8")
+        return 0
+
+    sys.stdout.write(snippet)
+    return 0
+
+
 def _cmd_stats(data_dir: Path, args: argparse.Namespace) -> int:
     """Print per-project store stats (human or JSON)."""
     ph = _resolve_project_hash(data_dir, args.project)
@@ -1457,6 +1491,29 @@ def _build_parser() -> argparse.ArgumentParser:
     pu.add_argument("--yes", "-y", action="store_true",
                     help="skip interactive confirmation")
 
+    pint = sub.add_parser(
+        "integrate",
+        help="emit an integration snippet for an AI coding agent "
+             "(claude|copilot|cursor|generic)",
+    )
+    pint.add_argument(
+        "target", nargs="?", default=None, metavar="<target>",
+        help="one of: claude, copilot, cursor, generic",
+    )
+    pint.add_argument(
+        "--list", action="store_true",
+        help="list supported targets and exit",
+    )
+    pint.add_argument(
+        "--out", default=None, metavar="PATH",
+        help="write the snippet to PATH instead of stdout "
+             "(creates parent dirs; refuses to overwrite without --force)",
+    )
+    pint.add_argument(
+        "--force", action="store_true",
+        help="overwrite --out PATH if it already exists",
+    )
+
     psess = sub.add_parser(
         "session",
         help="inspect or reset the per-shell token budget state",
@@ -1501,6 +1558,8 @@ def main(argv: list[str] | None = None) -> int:
             return _cmd_upgrade(args)
         if args.cmd == "session":
             return _cmd_session(args)
+        if args.cmd == "integrate":
+            return _cmd_integrate(args)
     except _ProjectNotFound as exc:
         # User asked for a project that doesn't exist → user error.
         print(f"error: {exc}", file=sys.stderr)
