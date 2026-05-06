@@ -47,6 +47,7 @@ where = ["src"]
 
 [tool.setuptools.package-data]
 mindkeep = ["py.typed"]
+"mindkeep.evals" = ["fixtures/*.json"]
 
 [tool.pytest.ini_options]
 minversion = "7.0"

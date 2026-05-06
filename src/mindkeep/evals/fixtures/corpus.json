@@ -1,0 +1,74 @@
+{
+  "version": 1,
+  "description": "Curated fixture corpus for mindkeep eval scenarios (P2-10, #15). ~30 facts + ~10 ADRs, English + CJK mix, deliberate term overlaps and pin/non-pin variety.",
+  "facts": [
+    {"ref": "f01", "content": "The mindkeep storage layer uses SQLite with WAL journal mode for crash-safe writes.", "tags": ["storage", "sqlite", "wal"], "pin": false},
+    {"ref": "f02", "content": "FTS5 powers full-text recall in mindkeep; bm25 ranks results lower-is-better.", "tags": ["recall", "fts5", "bm25"], "pin": false},
+    {"ref": "f03", "content": "The token estimator uses the heuristic ASCII chars divided by 4 and CJK chars divided by 2.", "tags": ["tokens", "estimator"], "pin": false},
+    {"ref": "f04", "content": "Write-guard rejects facts whose post-redaction content exceeds the per-kind cap (default 100 tokens).", "tags": ["write-guard", "facts", "cap"], "pin": true},
+    {"ref": "f05", "content": "Write-guard rejects ADRs whose post-redaction content exceeds the ADR cap (default 1500 tokens).", "tags": ["write-guard", "adrs", "cap"], "pin": true},
+    {"ref": "f06", "content": "Pinned rows surface first in show output; ordering is pin DESC then created_at DESC.", "tags": ["pin", "ordering"], "pin": true},
+    {"ref": "f07", "content": "The MemoryStore.recall API returns RecallHit dataclasses with kind, id, score, snippet, tags.", "tags": ["recall", "api"], "pin": false},
+    {"ref": "f08", "content": "Project identity is resolved via git remote, falling back to directory hash.", "tags": ["project-id", "git"], "pin": false},
+    {"ref": "f09", "content": "SecretsRedactor scrubs API keys and tokens from text before persistence.", "tags": ["security", "redaction"], "pin": false},
+    {"ref": "f10", "content": "Auto flush scheduler commits the SQLite connection on a background thread.", "tags": ["scheduler", "flush"], "pin": false},
+    {"ref": "f11", "content": "Session budget tracks per-session token spend and suppresses output when exhausted.", "tags": ["session", "budget"], "pin": false},
+    {"ref": "f12", "content": "ADRs auto-assign their number column as max(number) + 1 under an RLock for concurrency safety.", "tags": ["adrs", "concurrency"], "pin": false},
+    {"ref": "f13", "content": "The doctor command emits OK, WARN, and FAIL checks; --json gives machine-readable output.", "tags": ["doctor", "cli"], "pin": false},
+    {"ref": "f14", "content": "show --top K caps rendered rows per kind; --budget N caps total token spend across rows.", "tags": ["show", "top", "budget"], "pin": false},
+    {"ref": "f15", "content": "The export command produces a portable JSON snapshot; import re-hydrates a project DB.", "tags": ["export", "import"], "pin": false},
+    {"ref": "f16", "content": "Tags are stored as comma-joined TEXT in SQLite and decoded on read into a list.", "tags": ["tags", "schema"], "pin": false},
+    {"ref": "f17", "content": "Filter pipeline applies in order; each Filter.apply returns a possibly rewritten string.", "tags": ["filters", "api"], "pin": false},
+    {"ref": "f18", "content": "Cross-project preferences live in a global preferences.db file shared across projects.", "tags": ["preferences", "global"], "pin": false},
+    {"ref": "f19", "content": "Pinned ADRs appear before unpinned ones in list_adrs and show output.", "tags": ["pin", "adrs"], "pin": true},
+    {"ref": "f20", "content": "The CLI install script supports pipx and pip user installs on Windows and Unix.", "tags": ["install", "cli"], "pin": false},
+    {"ref": "f21", "content": "mindkeep 使用 SQLite 的 FTS5 扩展 来实现 全文检索 功能。", "tags": ["recall", "fts5", "cjk"], "pin": false},
+    {"ref": "f22", "content": "写入 守卫 会在 内容 超过 令牌 上限 时拒绝 写入,除非 传入 force=True。", "tags": ["write-guard", "cjk"], "pin": false},
+    {"ref": "f23", "content": "钉选 的事实 会优先 出现在 show 命令 的输出 中,排序 为 pin 降序。", "tags": ["pin", "cjk"], "pin": true},
+    {"ref": "f24", "content": "Migration scripts upgrade the schema between mindkeep versions in place.", "tags": ["migration", "schema"], "pin": false},
+    {"ref": "f25", "content": "Recall ranks results by bm25 score; lower scores indicate better matches.", "tags": ["recall", "bm25"], "pin": false},
+    {"ref": "f26", "content": "The token estimator returns at least 1 for any non-empty text input.", "tags": ["tokens", "estimator"], "pin": false},
+    {"ref": "f27", "content": "Write-guard also rejects pre-redaction content exceeding 2x the cap as a huge-blob guard.", "tags": ["write-guard", "blob"], "pin": false},
+    {"ref": "f28", "content": "Backups are not provided by mindkeep; users should snapshot the data dir externally.", "tags": ["backup"], "pin": false},
+    {"ref": "f29", "content": "The CLI exit code is 0 on success, 1 on user error, 2 on storage failure, 3 on validation.", "tags": ["cli", "exit-code"], "pin": false},
+    {"ref": "f30", "content": "Stats subcommand prints row counts and token totals across all kinds.", "tags": ["stats", "cli"], "pin": false}
+  ],
+  "adrs": [
+    {"ref": "a01", "title": "Use SQLite WAL for storage", "decision": "Adopt SQLite in WAL journal mode as the on-disk store for facts, ADRs, sessions, and preferences.", "rationale": "WAL gives crash-safe concurrent reads with a single writer and avoids external dependencies.", "tags": ["storage", "sqlite", "wal"], "pin": true},
+    {"ref": "a02", "title": "FTS5 for recall", "decision": "Use SQLite FTS5 with bm25 ranking for full-text recall over facts and ADRs.", "rationale": "FTS5 ships with SQLite, requires no extra runtime, and covers our recall quality bar.", "tags": ["recall", "fts5"], "pin": false},
+    {"ref": "a03", "title": "Token estimator heuristic", "decision": "Estimate tokens as ASCII chars divided by 4 and CJK chars divided by 2.", "rationale": "Cheap, deterministic, stdlib-only, and good enough for budget enforcement without a real tokenizer.", "tags": ["tokens", "estimator"], "pin": false},
+    {"ref": "a04", "title": "Dual-threshold write guard", "decision": "Reject writes whose post-redaction tokens exceed the cap, or whose pre-redaction tokens exceed 2x cap.", "rationale": "Catches both oversized clean content and huge unstructured blobs while letting redaction reduce small inputs.", "tags": ["write-guard", "security"], "pin": true},
+    {"ref": "a05", "title": "Pin priority ordering", "decision": "Order list_facts, list_adrs, and show output by pin DESC then created_at DESC then id DESC.", "rationale": "Pinned rows are the most important; deterministic tie-breakers make tests stable.", "tags": ["pin", "ordering"], "pin": false},
+    {"ref": "a06", "title": "Per-project DB layout", "decision": "Each project gets its own SQLite file under the data dir, keyed by a project hash.", "rationale": "Project isolation prevents cross-contamination and keeps recall scoped.", "tags": ["project-id", "storage"], "pin": false},
+    {"ref": "a07", "title": "Global preferences DB", "decision": "Store cross-project preferences in a single shared preferences.db.", "rationale": "Preferences should persist regardless of which project the user invokes mindkeep from.", "tags": ["preferences"], "pin": false},
+    {"ref": "a08", "title": "Stdlib-only runtime", "decision": "Keep mindkeep dependencies-free at runtime; rely solely on the Python standard library.", "rationale": "Easier install, smaller wheel, no supply-chain surface beyond CPython itself.", "tags": ["deps", "philosophy"], "pin": true},
+    {"ref": "a09", "title": "JSON output for doctor", "decision": "Provide --json on doctor for machine-readable health output with summary counts of OK, WARN, FAIL.", "rationale": "Enables CI integration and script-driven monitoring without parsing TTY output.", "tags": ["doctor", "json", "cli"], "pin": false},
+    {"ref": "a10", "title": "采用 SQLite 作为 存储 后端", "decision": "选择 SQLite 与 WAL 模式 作为 mindkeep 的核心 存储 后端,用于 事实、ADR 与 会话。", "rationale": "SQLite 自带,无外部 依赖,且支持 崩溃 安全 的并发 读取。", "tags": ["storage", "cjk"], "pin": false}
+  ],
+  "queries": {
+    "recall_at_5": [
+      {"q": "FTS5 OR bm25 OR recall", "expected": ["f02", "f25", "a02"]},
+      {"q": "write OR guard OR token OR cap", "expected": ["f04", "f05", "f27", "a04"]},
+      {"q": "estimator OR heuristic", "expected": ["f03", "f26", "a03"]},
+      {"q": "pin OR ordering", "expected": ["f06", "f19", "a05"]},
+      {"q": "doctor OR json", "expected": ["f13", "a09"]},
+      {"q": "SQLite OR WAL", "expected": ["f01", "a01"]},
+      {"q": "session OR budget", "expected": ["f11", "f14"]},
+      {"q": "auto OR flush OR scheduler", "expected": ["f10"]},
+      {"q": "preferences OR global", "expected": ["f18", "a07"]},
+      {"q": "stats OR subcommand", "expected": ["f30"]}
+    ],
+    "recall_top1": [
+      {"q": "scheduler OR background OR thread", "best": "f10"},
+      {"q": "stats OR subcommand", "best": "f30"},
+      {"q": "export OR import", "best": "f15"},
+      {"q": "RLock OR concurrency", "best": "f12"},
+      {"q": "redactor OR scrubs OR API", "best": "f09"}
+    ],
+    "recall_cjk": [
+      {"q": "全文检索", "expected": ["f21"]},
+      {"q": "钉选", "expected": ["f23"]},
+      {"q": "守卫", "expected": ["f22"]}
+    ]
+  }
+}
