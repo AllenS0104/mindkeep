@@ -287,27 +287,32 @@ def scenario_e5_top_compliance(data_dir: Path, cwd: Path) -> EvalResult:
 
 
 def scenario_e6_pin_priority(tmp_root: Path) -> EvalResult:
-    """E6 — 3 pinned + 5 unpinned facts; show --kind facts --top 3 returns the 3 pinned."""
+    """E6 — pinned facts must come first; show --kind facts --top N returns only pinned."""
     cwd = tmp_root / "e6_proj"
     data_dir = tmp_root / "e6_data"
     cwd.mkdir(parents=True, exist_ok=True)
     data_dir.mkdir(parents=True, exist_ok=True)
 
+    PINNED_COUNT = 3
+    UNPINNED_COUNT = 5
+
     store = MemoryStore.open(cwd=cwd, data_dir=data_dir)
     try:
-        for i in range(5):
+        for i in range(UNPINNED_COUNT):
             store.add_fact(f"unpinned-fact-{i:02d}-payload")
         pinned_ids: list[int] = []
-        for i in range(3):
+        for i in range(PINNED_COUNT):
             pinned_ids.append(store.add_fact(f"PINNED-fact-{i:02d}-payload", pin=True))
         store.commit()
     finally:
         store.close()
 
-    rc, out, _err = _run_cli(data_dir, cwd, "show", "--kind", "facts", "--top", "3")
+    rc, out, _err = _run_cli(
+        data_dir, cwd, "show", "--kind", "facts", "--top", str(PINNED_COUNT)
+    )
     rows = _data_rows(out, "facts")
     # Each row begins with "id | pin | key | value ..." — pin column is "*" when pinned.
-    # We assert all 3 returned rows have a "*" in the pin column.
+    # We assert all returned rows have a "*" in the pin column.
     pinned_marks = 0
     parsed_rows: list[list[str]] = []
     for line in rows:
@@ -315,16 +320,17 @@ def scenario_e6_pin_priority(tmp_root: Path) -> EvalResult:
         parsed_rows.append(cells)
         if len(cells) >= 2 and cells[1] == "*":
             pinned_marks += 1
-    ok = rc == 0 and len(rows) == 3 and pinned_marks == 3
+    ok = rc == 0 and len(rows) == PINNED_COUNT and pinned_marks == PINNED_COUNT
     return EvalResult(
         name="E6_pin_priority",
         metric=float(pinned_marks),
-        threshold=3.0,
+        threshold=float(PINNED_COUNT),
         passed=ok,
         details={
             "rendered_rows": rows,
             "pinned_marks": pinned_marks,
             "row_count": len(rows),
+            "expected_pinned": PINNED_COUNT,
             "rc": rc,
         },
     )
