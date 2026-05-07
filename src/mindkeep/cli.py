@@ -1372,6 +1372,31 @@ def _cmd_stats(data_dir: Path, args: argparse.Namespace) -> int:
     return 0
 
 
+def _cmd_mcp(args: argparse.Namespace) -> int:
+    """Dispatch ``mindkeep mcp <subcommand>``.
+
+    ``mindkeep.mcp.server`` is imported here, on first dispatch, so
+    that argparse parser construction (and ``mindkeep --help``) never
+    pulls in ``mindkeep.mcp.*`` — keeping the lazy-import contract in
+    DESIGN-v0.4.0 §7.1 honored. ``mindkeep.mcp.server`` itself only
+    imports the ``mcp`` SDK lazily inside its own ``main()``.
+    """
+    if args.mcp_cmd == "serve":
+        from .mcp.server import main as _serve_main
+
+        forwarded: list[str] = []
+        if args.project_dir:
+            forwarded += ["--project-dir", args.project_dir]
+        if args.read_only:
+            forwarded.append("--read-only")
+        if args.allow_writes:
+            forwarded.append("--allow-writes")
+        return _serve_main(forwarded)
+    # Unreachable: subparsers is required=True.
+    print("error: missing mcp subcommand", file=sys.stderr)  # pragma: no cover
+    return 2  # pragma: no cover
+
+
 def _build_parser() -> argparse.ArgumentParser:
     p = argparse.ArgumentParser(
         prog="mindkeep",
@@ -1514,6 +1539,37 @@ def _build_parser() -> argparse.ArgumentParser:
         help="overwrite --out PATH if it already exists",
     )
 
+    # ``mcp`` subcommand. Parser construction MUST stay free of any
+    # ``mcp`` SDK imports — DESIGN-v0.4.0 §7.1 hard requirement. The
+    # SDK is only imported lazily inside ``mindkeep.mcp.server.main``
+    # when this subcommand is actually dispatched.
+    pmcp = sub.add_parser("mcp", help="MCP server commands (v0.4.0+)")
+    pmcp_sub = pmcp.add_subparsers(
+        dest="mcp_cmd", metavar="<subcommand>", required=True,
+    )
+    pmcp_serve = pmcp_sub.add_parser(
+        "serve",
+        help="run the mindkeep MCP server over stdio",
+        description=(
+            "Run the mindkeep MCP server over stdio. Requires the "
+            "[mcp] extra: pip install 'mindkeep[mcp]'."
+        ),
+    )
+    pmcp_serve.add_argument(
+        "--project-dir", default=None, metavar="PATH",
+        help="bind the server to PATH "
+             "(overrides MINDKEEP_PROJECT_DIR and cwd discovery)",
+    )
+    pmcp_g = pmcp_serve.add_mutually_exclusive_group()
+    pmcp_g.add_argument(
+        "--read-only", action="store_true",
+        help="explicit read-only mode (default; alias / no-op for now)",
+    )
+    pmcp_g.add_argument(
+        "--allow-writes", action="store_true",
+        help="enable write tools (off by default; wired up in #35)",
+    )
+
     psess = sub.add_parser(
         "session",
         help="inspect or reset the per-shell token budget state",
@@ -1560,6 +1616,8 @@ def main(argv: list[str] | None = None) -> int:
             return _cmd_session(args)
         if args.cmd == "integrate":
             return _cmd_integrate(args)
+        if args.cmd == "mcp":
+            return _cmd_mcp(args)
     except _ProjectNotFound as exc:
         # User asked for a project that doesn't exist → user error.
         print(f"error: {exc}", file=sys.stderr)
