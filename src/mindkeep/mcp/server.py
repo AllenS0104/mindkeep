@@ -200,7 +200,9 @@ def main(argv: Optional[List[str]] = None) -> int:
     import jsonschema  # type: ignore[import-not-found]
     from mcp import types as mcp_types  # type: ignore[import-not-found]
 
+    from .resources import register_resources
     from .tools import TOOLS, ToolSpec
+    from .tools_pin import build_pin_tools
     from .tools_write import build_write_tools, make_internal_error, make_tool_error
 
     store = MemoryStore.open(cwd=project_dir)
@@ -269,6 +271,21 @@ def main(argv: Optional[List[str]] = None) -> int:
             wtools, whandlers = build_write_tools()
             all_tools.extend(wtools)
             all_handlers.update(whandlers)
+            ptools, phandlers = build_pin_tools()
+            all_tools.extend(ptools)
+            all_handlers.update(phandlers)
+
+        # Resources are READ-ONLY (DESIGN §4); registered regardless
+        # of ``--allow-writes``. The closure captures the resolved
+        # project metadata so ``mindkeep://project`` returns the same
+        # binding the startup stderr line already announced.
+        register_resources(
+            srv,
+            store,
+            resolved_project_dir=project_dir,
+            id_source=id_source,
+            allow_writes=bool(args.allow_writes),
+        )
 
         @srv.list_tools()  # type: ignore[misc]
         async def _list_tools():  # noqa: D401 - SDK callback shape
