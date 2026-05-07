@@ -39,3 +39,31 @@ jobs:
 
       - name: Run tests
         run: pytest tests/ -v
+
+  mcp-extra:
+    name: mcp-extra (ubuntu-latest, py3.12, mcp 1.26)
+    runs-on: ubuntu-latest
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Set up Python 3.12
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
+      - name: Upgrade pip
+        run: python -m pip install --upgrade pip
+
+      - name: Install package with [mcp] extra and pinned tested SDK
+        # The [mcp] extra is `mcp>=1.0,<2.0`; we pin 1.26.0 here to
+        # match the version called out in DESIGN-v0.4.0 §7. Bumps are
+        # an intentional, reviewable change.
+        run: |
+          python -m pip install -e ".[dev,mcp]"
+          python -m pip install "mcp==1.26.0"
+
+      - name: Run tests including stdio round-trip
+        env:
+          MINDKEEP_MCP_STDIO_E2E: "1"
+        run: pytest tests/ -v

@@ -33,9 +33,15 @@ dev = [
     "pytest>=7.4",
     "pytest-cov>=4.1",
 ]
+# Optional MCP server support. Pinned per DESIGN-v0.4.0 §7: tested
+# against mcp 1.26.0; <2.0 protects v0.4 from a future breaking-major.
+mcp = [
+    "mcp>=1.0,<2.0",
+]
 
 [project.scripts]
 mindkeep = "mindkeep.cli:main"
+mindkeep-mcp = "mindkeep.mcp.server:main"
 
 [project.urls]
 Homepage = "https://github.com/AllenS0104/mindkeep"
