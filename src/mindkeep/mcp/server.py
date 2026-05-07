@@ -77,8 +77,9 @@ def build_parser() -> argparse.ArgumentParser:
         "--allow-writes",
         action="store_true",
         help=(
-            "enable write tools (off by default; ignored in skeleton, "
-            "wired up in #35)"
+            "enable write tools (off by default — see DESIGN-v0.4.0 §9). "
+            "Without this flag, mindkeep_add_fact / mindkeep_add_adr are "
+            "not registered and do not appear in tools/list."
         ),
     )
     return p
@@ -170,6 +171,13 @@ def main(argv: Optional[List[str]] = None) -> int:
     try:
         from mcp.server import Server  # type: ignore[import-not-found]
         from mcp.server.stdio import stdio_server  # type: ignore[import-not-found]
+        from mcp.shared.exceptions import McpError  # type: ignore[import-not-found]
+        from mcp.types import (  # type: ignore[import-not-found]
+            CallToolRequest,
+            ErrorData,
+            METHOD_NOT_FOUND,
+            ServerResult,
+        )
     except ImportError:
         sys.stderr.write(_INSTALL_HINT)
         return 2
@@ -179,23 +187,97 @@ def main(argv: Optional[List[str]] = None) -> int:
     # project". Mirrors the data the ``mindkeep://project`` resource
     # will expose in #34 (DESIGN §8.3).
     sys.stderr.write(
-        f"mindkeep-mcp: project_dir={project_dir} id_source={id_source}\n"
+        f"mindkeep-mcp: project_dir={project_dir} id_source={id_source} "
+        f"allow_writes={bool(args.allow_writes)}\n"
     )
 
     # Local imports to keep module-load time minimal and to keep this
     # block out of the ``--help`` path.
     import asyncio
 
+    import jsonschema  # type: ignore[import-not-found]
+
     from .tools import TOOLS
+    from .tools_write import build_write_tools, make_internal_error, make_tool_error
 
     store = MemoryStore.open(cwd=project_dir)
     try:
         srv = Server("mindkeep")
 
+        # Build the registry. Read tools (#35) will hang off this same
+        # composition point. Write tools register only when the server
+        # was started with ``--allow-writes`` (DESIGN §9.1) — without
+        # the flag they are not announced in ``tools/list`` at all, so
+        # the model literally cannot try to call them.
+        all_tools = list(TOOLS)
+        all_handlers: dict = {}
+        if args.allow_writes:
+            wtools, whandlers = build_write_tools()
+            all_tools.extend(wtools)
+            all_handlers.update(whandlers)
+
         @srv.list_tools()  # type: ignore[misc]
         async def _list_tools():  # noqa: D401 - SDK callback shape
-            # #33 ships an empty registry; #34/#35 will populate it.
-            return list(TOOLS)
+            return list(all_tools)
+
+        # We install a custom ``CallToolRequest`` handler directly
+        # rather than using ``@srv.call_tool()`` because the SDK's
+        # decorator catches *every* ``Exception`` and converts it to a
+        # tool-result error. DESIGN §10.2 requires unhandled exceptions
+        # to surface as JSON-RPC -32603 with the traceback going to
+        # stderr only — ``McpError`` is the SDK's escape hatch for that
+        # path (re-raised by ``Server._handle_request``).
+        async def _call_tool_handler(req):  # type: ignore[no-untyped-def]
+            name = req.params.name
+            arguments = req.params.arguments or {}
+            handler = all_handlers.get(name)
+            if handler is None:
+                # Method-not-found at the protocol layer — the model
+                # asked for a tool we did not register. Standard
+                # JSON-RPC -32601.
+                raise McpError(
+                    ErrorData(
+                        code=METHOD_NOT_FOUND,
+                        message=f"Unknown tool: {name}",
+                    )
+                )
+
+            tool_def = next((t for t in all_tools if t.name == name), None)
+            if tool_def is not None:
+                try:
+                    jsonschema.validate(
+                        instance=arguments, schema=tool_def.inputSchema
+                    )
+                except jsonschema.ValidationError as exc:
+                    # Schema validation failure: §10 invalid_argument,
+                    # surfaced as a tool-result error so the model can
+                    # recover (edit the call and retry).
+                    return ServerResult(
+                        make_tool_error(
+                            "invalid_argument",
+                            exc.message,
+                            {
+                                "field": ".".join(str(p) for p in exc.absolute_path),
+                                "value": exc.instance,
+                                "reason": exc.message,
+                            },
+                        )
+                    )
+
+            try:
+                result = await handler(store, arguments)
+            except McpError:
+                raise
+            except Exception as exc:  # pragma: no cover - defensive
+                # ``make_internal_error`` writes the full traceback to
+                # stderr (NEVER stdout — see DESIGN §3.4) and returns a
+                # fresh ``McpError(ErrorData(code=-32603, ...))`` whose
+                # message contains only the exception class name.
+                raise make_internal_error(exc) from None
+
+            return ServerResult(result)
+
+        srv.request_handlers[CallToolRequest] = _call_tool_handler
 
         async def _run() -> None:
             async with stdio_server() as (read_stream, write_stream):
