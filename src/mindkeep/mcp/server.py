@@ -27,7 +27,7 @@ import os
 import sys
 import tempfile
 from pathlib import Path
-from typing import List, Optional, Tuple
+from typing import Any, List, Optional, Tuple
 
 from ..memory_api import MemoryStore
 
@@ -194,23 +194,77 @@ def main(argv: Optional[List[str]] = None) -> int:
     # Local imports to keep module-load time minimal and to keep this
     # block out of the ``--help`` path.
     import asyncio
+    import json as _json
+    import traceback
 
     import jsonschema  # type: ignore[import-not-found]
+    from mcp import types as mcp_types  # type: ignore[import-not-found]
 
-    from .tools import TOOLS
+    from .tools import TOOLS, ToolSpec
     from .tools_write import build_write_tools, make_internal_error, make_tool_error
 
     store = MemoryStore.open(cwd=project_dir)
     try:
         srv = Server("mindkeep")
 
-        # Build the registry. Read tools (#35) will hang off this same
-        # composition point. Write tools register only when the server
-        # was started with ``--allow-writes`` (DESIGN §9.1) — without
-        # the flag they are not announced in ``tools/list`` at all, so
-        # the model literally cannot try to call them.
-        all_tools = list(TOOLS)
+        # Build the registry.
+        #
+        # * Read tools (#35) come in as ToolSpec instances in TOOLS;
+        #   we convert each into an mcp.types.Tool and wrap its sync
+        #   handler in an async adapter that produces CallToolResult.
+        # * Write tools (#34) register only when the server was started
+        #   with ``--allow-writes`` (DESIGN §9.1) — without the flag
+        #   they are not announced in ``tools/list`` at all, so the
+        #   model literally cannot try to call them.
+        all_tools: list = []
         all_handlers: dict = {}
+
+        from ..storage import StorageError as _StorageError
+
+        def _make_read_handler(_spec: ToolSpec):
+            async def _handler(store, arguments):  # type: ignore[no-untyped-def]
+                try:
+                    result = _spec.handler(store, **(arguments or {}))
+                except ValueError as exc:
+                    return make_tool_error(
+                        "invalid_argument",
+                        str(exc),
+                        {"tool": _spec.name, "reason": str(exc)},
+                    )
+                except _StorageError as exc:
+                    return make_tool_error(
+                        "storage",
+                        f"storage error: {exc}",
+                        {
+                            "reason": str(exc),
+                            "schema_version": getattr(exc, "schema_version", None),
+                            "recoverable": getattr(exc, "recoverable", False),
+                        },
+                    )
+                payload_text = _json.dumps(result, default=str)
+                structured = (
+                    result if isinstance(result, dict) else {"items": result}
+                )
+                return mcp_types.CallToolResult(
+                    content=[mcp_types.TextContent(type="text", text=payload_text)],
+                    structuredContent=structured,
+                    isError=False,
+                )
+
+            return _handler
+
+        for _spec in TOOLS:
+            if not isinstance(_spec, ToolSpec):
+                continue  # skip ad-hoc registrations (test fixtures)
+            all_tools.append(
+                mcp_types.Tool(
+                    name=_spec.name,
+                    description=_spec.description,
+                    inputSchema=_spec.input_schema,
+                )
+            )
+            all_handlers[_spec.name] = _make_read_handler(_spec)
+
         if args.allow_writes:
             wtools, whandlers = build_write_tools()
             all_tools.extend(wtools)
