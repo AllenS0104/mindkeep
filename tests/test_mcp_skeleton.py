@@ -304,12 +304,16 @@ def test_tools_registry_is_empty_skeleton() -> None:
     os.environ.get("MINDKEEP_MCP_STDIO_E2E") != "1",
     reason="round-trip e2e requires the [mcp] extra and is opt-in via env",
 )
-def test_tools_list_returns_empty_over_stdio(tmp_path: Path) -> None:
-    """End-to-end smoke: spawn the server, list tools, expect ``[]``.
+def test_tools_list_returns_read_tools_over_stdio(tmp_path: Path) -> None:
+    """End-to-end smoke: spawn the server, list tools, expect the five read tools.
+
+    Updated for #35: the skeleton's ``[]`` invariant is replaced by the
+    read-only-mode invariant from DESIGN-v0.4.0 §14.1 — the read tools
+    are always available, the write tools (#34) require ``--allow-writes``.
 
     Gated behind ``MINDKEEP_MCP_STDIO_E2E=1`` (set by the optional CI
     job that installs ``mindkeep[mcp]``) so the core matrix never
-    requires the SDK. Imports the SDK lazily.
+    requires the SDK.
     """
     pytest.importorskip("mcp")
     import asyncio
@@ -333,4 +337,11 @@ def test_tools_list_returns_empty_over_stdio(tmp_path: Path) -> None:
                 return list(result.tools)
 
     tools = asyncio.run(_go())
-    assert tools == []
+    names = {t.name for t in tools}
+    assert {
+        "mindkeep_recall",
+        "mindkeep_list_facts",
+        "mindkeep_list_adrs",
+        "mindkeep_stats",
+        "mindkeep_doctor",
+    } <= names
