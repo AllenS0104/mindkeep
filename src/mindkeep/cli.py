@@ -904,16 +904,20 @@ def _cmd_integrate(args: argparse.Namespace) -> int:
     from . import _integrations
 
     if getattr(args, "list", False):
-        for name in _integrations.supported():
+        for name in _integrations.supported_all():
             print(name)
         return 0
 
     target = args.target
-    if target is None or target not in _integrations.TARGETS:
-        supported = ", ".join(_integrations.supported())
+    all_targets = _integrations.supported_all()
+    if target is None or target not in all_targets:
+        supported = ", ".join(all_targets)
         print(f"error: unknown target: {target!r}", file=sys.stderr)
         print(f"supported targets: {supported}", file=sys.stderr)
         return 2
+
+    if target in _integrations.MCP_TARGETS:
+        return _cmd_integrate_mcp(args, target)
 
     snippet = _integrations.render(target)
 
@@ -931,6 +935,120 @@ def _cmd_integrate(args: argparse.Namespace) -> int:
         return 0
 
     sys.stdout.write(snippet)
+    return 0
+
+
+def _cmd_integrate_mcp(args: argparse.Namespace, target: str) -> int:
+    """Handle the JSON / JSONC MCP integrate targets.
+
+    See DESIGN-v0.4.0.md §12 for the full behavior contract:
+
+    - Default (no ``--out``): print snippet to stdout. No file writes.
+    - ``continue-mcp``: ALWAYS prints to stdout (JSONC merge deferred —
+      a stderr note is emitted if the user passed ``--out``).
+    - ``claude-desktop`` / ``cursor-mcp`` with ``--out PATH``: parse the
+      file as strict JSON (refusing JSONC), merge ``mcpServers.mindkeep``
+      preserving every other key, copy the original to ``<path>.bak``,
+      then write atomically. ``--force`` is required to overwrite an
+      existing ``mindkeep`` entry; ``--dry-run`` skips the write.
+    """
+    from . import _integrations
+
+    project_dir = getattr(args, "project_dir", None) or os.getcwd()
+    project_dir = str(Path(project_dir).resolve())
+
+    # Soft warning if the user is integrating from a directory with no
+    # `.mindkeep/` marker. We still bake the cwd (DESIGN-v0.4.0 §8.6 is
+    # explicit that integrate-time cwd wins) but flag it so the user can
+    # rerun from the right project root if this was accidental.
+    if not (Path(project_dir) / ".mindkeep").is_dir():
+        print(
+            f"warning: {project_dir} has no .mindkeep/ directory; baking it "
+            f"anyway. Re-run from your project root or pass --project-dir "
+            f"if this is wrong.",
+            file=sys.stderr,
+        )
+
+    snippet_text = _integrations.mcp_snippet_text(target, project_dir)
+    out = getattr(args, "out", None)
+    dry_run = bool(getattr(args, "dry_run", False))
+    force = bool(getattr(args, "force", False))
+
+    # continue-mcp is snippet-to-stdout only in v0.4 (JSONC round-trip
+    # deferred). Honour --out by warning and falling through to stdout.
+    if target == "continue-mcp":
+        if out:
+            print(
+                "note: continue-mcp does not support in-place merge in v0.4 "
+                "(Continue config is JSONC); printing snippet to stdout for "
+                "manual paste. See docs/MCP-INSTALL.md.",
+                file=sys.stderr,
+            )
+        sys.stdout.write(snippet_text)
+        print(
+            "# to enable write tools, add \"--allow-writes\" to args "
+            "(read-only by default).",
+            file=sys.stderr,
+        )
+        return 0
+
+    if not out:
+        if force:
+            print(
+                "warning: --force has no effect without --out (snippet-only "
+                "mode does not write).",
+                file=sys.stderr,
+            )
+        sys.stdout.write(snippet_text)
+        print(
+            "# to enable write tools, add \"--allow-writes\" to args "
+            "(read-only by default).",
+            file=sys.stderr,
+        )
+        return 0
+
+    out_path = Path(out)
+    try:
+        existing = _integrations.load_json_config(out_path)
+    except _integrations.JsoncDetectedError as e:
+        print(f"error: {e}", file=sys.stderr)
+        return 2
+    except ValueError as e:
+        print(f"error: {e}", file=sys.stderr)
+        return 2
+
+    try:
+        merged = _integrations.merge_mcp_config(
+            existing, target, project_dir, force=force
+        )
+    except _integrations.MindkeepEntryExistsError as e:
+        print(f"error: {e}", file=sys.stderr)
+        return 2
+    except ValueError as e:
+        print(f"error: {e}", file=sys.stderr)
+        return 2
+
+    merged_text = json.dumps(merged, indent=2) + "\n"
+
+    if dry_run:
+        sys.stdout.write(merged_text)
+        print(
+            f"# dry-run: {out_path} would be written ({len(merged_text)} "
+            f"bytes); no changes made.",
+            file=sys.stderr,
+        )
+        return 0
+
+    bak = _integrations.backup_file(out_path)
+    _integrations.atomic_write_json(out_path, merged)
+    if bak is not None:
+        print(f"backed up previous config to {bak}", file=sys.stderr)
+    print(f"wrote {out_path}", file=sys.stderr)
+    print(
+        "# to enable write tools, add \"--allow-writes\" to args in the "
+        "mindkeep entry (read-only by default).",
+        file=sys.stderr,
+    )
     return 0
 
 
@@ -1188,11 +1306,27 @@ def _build_parser() -> argparse.ArgumentParser:
     pint = sub.add_parser(
         "integrate",
         help="emit an integration snippet for an AI coding agent "
-             "(claude|copilot|cursor|generic)",
+             "(markdown: claude|copilot|cursor|generic; "
+             "MCP: claude-desktop|cursor-mcp|continue-mcp)",
+        description=(
+            "Emit an integration snippet for an AI coding agent.\n\n"
+            "Markdown targets (paste into agent-instruction files):\n"
+            "  claude         Claude Code / claude.ai instruction block\n"
+            "  copilot        GitHub Copilot instruction block\n"
+            "  cursor         Cursor instruction block\n"
+            "  generic        vendor-neutral instruction block\n\n"
+            "MCP targets (register the mindkeep MCP server):\n"
+            "  claude-desktop Claude Desktop config (JSON merge with --out)\n"
+            "  cursor-mcp     Cursor MCP config (JSON merge with --out)\n"
+            "  continue-mcp   Continue config (snippet-to-stdout only; "
+            "JSONC merge deferred)\n"
+        ),
+        formatter_class=argparse.RawDescriptionHelpFormatter,
     )
     pint.add_argument(
         "target", nargs="?", default=None, metavar="<target>",
-        help="one of: claude, copilot, cursor, generic",
+        help="one of: claude, copilot, cursor, generic, "
+             "claude-desktop, cursor-mcp, continue-mcp",
     )
     pint.add_argument(
         "--list", action="store_true",
@@ -1200,12 +1334,28 @@ def _build_parser() -> argparse.ArgumentParser:
     )
     pint.add_argument(
         "--out", default=None, metavar="PATH",
-        help="write the snippet to PATH instead of stdout "
-             "(creates parent dirs; refuses to overwrite without --force)",
+        help="markdown targets: write snippet to PATH (refuses to overwrite "
+             "without --force). MCP targets: merge into the JSON config at "
+             "PATH (preserving unrelated keys; refuses if a 'mindkeep' "
+             "entry exists without --force). continue-mcp ignores --out "
+             "(JSONC merge deferred to a future release).",
     )
     pint.add_argument(
         "--force", action="store_true",
-        help="overwrite --out PATH if it already exists",
+        help="markdown: overwrite --out PATH if it exists. MCP: overwrite "
+             "an existing 'mindkeep' entry inside mcpServers.",
+    )
+    pint.add_argument(
+        "--dry-run", action="store_true",
+        help="MCP targets only: with --out, print the would-be merged "
+             "config to stdout without writing.",
+    )
+    pint.add_argument(
+        "--project-dir", default=None, metavar="PATH",
+        help="MCP targets only: bake PATH into the snippet's "
+             "MINDKEEP_PROJECT_DIR (claude-desktop / cursor-mcp) or "
+             "--project-dir argv (continue-mcp). Defaults to the current "
+             "working directory.",
     )
 
     # ``mcp`` subcommand. Parser construction MUST stay free of any
