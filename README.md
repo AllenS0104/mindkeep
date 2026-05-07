@@ -1,6 +1,6 @@
 # 🧠 mindkeep
 
-[![PyPI](https://img.shields.io/pypi/v/mindkeep?color=brightgreen&label=pypi)](https://pypi.org/project/mindkeep/) [![Release](https://img.shields.io/github/v/release/AllenS0104/mindkeep?label=release&color=brightgreen)](https://github.com/AllenS0104/mindkeep/releases/latest) [![License](https://img.shields.io/badge/license-MIT-blue.svg)](./LICENSE) [![Python](https://img.shields.io/badge/python-%E2%89%A53.9-blue.svg)](https://www.python.org/) [![Tests](https://img.shields.io/badge/tests-159%20passed-brightgreen.svg)](https://github.com/AllenS0104/mindkeep/actions) [![Platform](https://img.shields.io/badge/platform-win%20%7C%20mac%20%7C%20linux-lightgrey.svg)](./docs/INSTALL.md) [![Zero deps](https://img.shields.io/badge/runtime%20deps-0-success.svg)](./pyproject.toml)
+[![PyPI](https://img.shields.io/pypi/v/mindkeep?color=brightgreen&label=pypi)](https://pypi.org/project/mindkeep/) [![Release](https://img.shields.io/github/v/release/AllenS0104/mindkeep?label=release&color=brightgreen)](https://github.com/AllenS0104/mindkeep/releases/latest) [![License](https://img.shields.io/badge/license-MIT-blue.svg)](./LICENSE) [![Python](https://img.shields.io/badge/python-%E2%89%A53.9-blue.svg)](https://www.python.org/) [![Tests](https://img.shields.io/badge/tests-278%20passed-brightgreen.svg)](https://github.com/AllenS0104/mindkeep/actions) [![Platform](https://img.shields.io/badge/platform-win%20%7C%20mac%20%7C%20linux-lightgrey.svg)](./docs/INSTALL.md) [![Zero deps](https://img.shields.io/badge/runtime%20deps-0-success.svg)](./pyproject.toml)
 
 > **Install:** `pipx install mindkeep` (or `pip install mindkeep`) · See [Getting Started](./docs/GETTING-STARTED.md) · 中文版 [快速上手](./docs/GETTING-STARTED.zh.md)
 
@@ -15,10 +15,15 @@ SQLite files you can read, back up or `git diff`.
 
 - 🔒 **Crash-safe** — WAL + 30s flush, survives SIGKILL
 - 🗂 **Per-project isolation** — one SQLite file per repo hash
+- 🔍 **Ranked recall** — `mindkeep recall <query>` over FTS5 + bm25 (CJK-friendly)
+- 📌 **Pin priority** — pinned facts/ADRs always surface first, survive token budgets
+- 🪙 **Token-aware** — `--budget N` caps rendered output by token count; per-session budget via `MINDKEEP_SESSION_BUDGET`
+- 🛡 **Write guard** — dual-threshold cap (facts ≤ 100 / ADRs ≤ 1500 tokens) blocks runaway writes
+- 🩺 **Doctor** — `mindkeep doctor` runs 8 health checks (schema, WAL, FTS5, cap pressure, …)
+- 🔌 **Drop-in agent integration** — `mindkeep integrate <claude|copilot|cursor|generic>` emits a ready-to-paste snippet
 - 🌐 **Global preferences** — user tastes follow you across projects
-- 🛡 **Secrets redactor** — 11 credential patterns scrubbed by default
+- 🔐 **Secrets redactor** — 11 credential patterns scrubbed by default
 - 🪶 **stdlib-only core** — no deps at runtime, `pip` stays quiet
-- 🔌 **CLI + Python API** — `mindkeep show` or `from mindkeep import MemoryStore`
 - 📦 **JSON export/import** — portable, inspectable, diffable
 
 ---
@@ -92,7 +97,7 @@ and runs `mindkeep doctor` so you know it works.
 Grab the `.whl` + `SHA256SUMS` from the [Releases page](https://github.com/AllenS0104/mindkeep/releases):
 
 ```bash
-pip install --user ./mindkeep-0.2.0-py3-none-any.whl
+pip install --user ./mindkeep-0.3.0-py3-none-any.whl
 ```
 
 ### Verify
@@ -151,44 +156,23 @@ Each repo gets its own SQLite file. Crash, switch context, reboot — your agent
 
 ## 🤖 Plug into your AI agent
 
-Wire `mindkeep` into whichever agent you use. Two recipes below; the pattern (recall on start, store on decision) is identical for any other tool.
+mindkeep ships with a built-in snippet generator. Pick your agent, paste, done:
 
-### GitHub Copilot CLI
-
-Drop this into `~/.copilot/copilot-instructions.md` (or your repo's `AGENTS.md`):
-
-```markdown
-## Project memory
-
-At session start, load prior decisions for this project:
-  mindkeep show --kind facts --limit 20
-  mindkeep show --kind adrs  --limit 10
-
-When you make architectural decisions or capture user preferences, persist
-them via the Python API (the CLI is intentionally read-only):
-  python -c "from mindkeep import MemoryStore; s=MemoryStore.open(); \
-             s.add_fact('<short claim about the project>', tags=['<topic>']); s.close()"
-  python -c "from mindkeep import MemoryStore; s=MemoryStore.open(); \
-             s.add_adr('<short title>', decision='<the decision>', rationale='<why>'); s.close()"
-
-Forget secrets — the redactor handles them, but don't rely on it.
+```bash
+mindkeep integrate copilot   >> ~/.copilot/AGENTS.md
+mindkeep integrate claude    >> ~/.claude/CLAUDE.md
+mindkeep integrate cursor    >> .cursorrules
+mindkeep integrate generic   # vendor-neutral markdown to stdout
 ```
 
-### Claude Code
+Each snippet tells the agent to:
 
-Add the same pattern to `~/.claude/CLAUDE.md` (or wrap it as a project skill):
+- Load prior context at session start (`mindkeep show --kind facts|adrs|sessions`)
+- Run targeted lookups before non-trivial answers (`mindkeep recall "<query>"`)
+- Persist durable signal proactively (facts, ADRs, preferences)
+- Skip silently when mindkeep isn't installed
 
-```markdown
-# Project memory
-
-Before answering, check project memory:
-  mindkeep show --kind facts --limit 10
-  mindkeep show --kind adrs  --limit 10
-
-After confirming a decision with the user, persist it via the Python API:
-  python -c "from mindkeep import MemoryStore; s=MemoryStore.open(); \
-             s.add_adr('<short title>', decision='<the decision>', rationale='<one-paragraph rationale>'); s.close()"
-```
+Run `mindkeep integrate --list` to see all targets. The pattern (recall on start, store on decision) generalizes — feel free to fork the snippet for any other tool.
 
 Full CLI surface and Python API are in [`docs/USAGE.md`](./docs/USAGE.md).
 
@@ -214,17 +198,23 @@ See also: [ARCHITECTURE.md](./ARCHITECTURE.md) · [CHANGELOG.md](./CHANGELOG.md)
 
 ### CLI — 命令行
 
-Eight subcommands, all `--help`-friendly:
+Fourteen subcommands, all `--help`-friendly:
 
 ```text
-list      list all known projects
-show      show rows for a project  (--kind facts|adrs|preferences|sessions|all)
-clear     delete rows from a project
-export    dump a project to JSON
-import    load a JSON dump into a project
-where     print data_dir and current project id
-doctor    run environment health checks
-upgrade   pull the latest release (pip/pipx auto-detected)
+list       list all known projects
+show       show rows for a project  (--kind facts|adrs|preferences|sessions|all)
+clear      delete rows from a project
+pin        pin a fact or ADR so it surfaces first
+unpin      remove the pinned flag from a fact or ADR
+export     dump a project to JSON
+import     load a JSON dump into a project
+where      print data_dir and current project id
+doctor     run environment health checks (schema, WAL, FTS5, cap, …)
+stats      print introspection stats for a project
+recall     full-text search across facts and ADRs (FTS5 + bm25)
+upgrade    pull the latest mindkeep (pip/pipx auto-detected)
+integrate  emit an AI-agent integration snippet (claude|copilot|cursor|generic)
+session    inspect or reset the per-shell token-budget state
 ```
 
 One full example — inspect the current repo's memory:
