@@ -139,7 +139,12 @@ def _sum_tokens(lines: Iterable[str]) -> int:
 def scenario_e1_recall_at_5(
     store: MemoryStore, corpus: dict[str, Any], maps: dict[str, dict[str, int]]
 ) -> EvalResult:
-    """E1 — recall@5 precision: mean(intersection / |expected|) >= 0.7."""
+    """E1 — recall@5 precision: mean(intersection / |expected|) >= 0.85.
+
+    Threshold tightened in #28 (was 0.7). 0.85 catches a roughly 1-in-5
+    mis-ranking across the synonym-heavy corpus while still leaving room
+    for a single hard query to slip without flaking the suite.
+    """
     queries = corpus["queries"]["recall_at_5"]
     fact_map = maps["facts"]
     adr_map = maps["adrs"]
@@ -160,7 +165,7 @@ def scenario_e1_recall_at_5(
             "score": score,
         })
     metric = sum(scores) / len(scores) if scores else 0.0
-    threshold = 0.7
+    threshold = 0.85
     return EvalResult(
         name="E1_recall_at_5_precision",
         metric=round(metric, 4),
@@ -173,7 +178,13 @@ def scenario_e1_recall_at_5(
 def scenario_e2_recall_ordering(
     store: MemoryStore, corpus: dict[str, Any], maps: dict[str, dict[str, int]]
 ) -> EvalResult:
-    """E2 — top-1 of best-answer queries hits expected at >= 80%."""
+    """E2 — top-1 of best-answer queries hits expected at >= 85%.
+
+    Threshold tightened in #28 (was 0.8). With 5 best-answer queries,
+    0.85 means at most 0 misses are tolerated when ``len % 0.85`` rounds
+    down — i.e. all five must hit, but a single near-miss in a future
+    larger set would not flake.
+    """
     queries = corpus["queries"]["recall_top1"]
     fact_map = maps["facts"]
     adr_map = maps["adrs"]
@@ -187,7 +198,7 @@ def scenario_e2_recall_ordering(
             correct += 1
         per_query.append({"query": q["q"], "best": q["best"], "top1": top_ref, "ok": ok})
     metric = correct / len(queries) if queries else 0.0
-    threshold = 0.8
+    threshold = 0.85
     return EvalResult(
         name="E2_recall_ordering_top1",
         metric=round(metric, 4),
@@ -407,6 +418,67 @@ def scenario_e8_doctor_green(data_dir: Path, cwd: Path) -> EvalResult:
     )
 
 
+def scenario_e9_bm25_term_density(tmp_root: Path) -> EvalResult:
+    """E9 — bm25 term-frequency sanity: a term-dense fact must outrank a
+    semantically-related but term-sparse fact for that term.
+
+    Added in #28 as a guard against a regression where ``recall_facts``
+    drops the ``ORDER BY bm25(...)`` clause (or otherwise stops weighting
+    term frequency). Uses an isolated tmp store so it does not depend on
+    fixture corpus content.
+    """
+    cwd = tmp_root / "e9_proj"
+    data_dir = tmp_root / "e9_data"
+    cwd.mkdir(parents=True, exist_ok=True)
+    data_dir.mkdir(parents=True, exist_ok=True)
+
+    # Use a deliberately rare token so no fixture noise can leak in.
+    rare_term = "snorklewhomp"
+    dense = (
+        f"{rare_term} indexes {rare_term} tables for {rare_term} search "
+        f"and {rare_term} ranking heuristics."
+    )
+    sparse = (
+        "General indexing notes: this row mentions "
+        f"{rare_term} once but is mostly about unrelated metadata, "
+        "schemas, migrations, and varied filler text used as a length "
+        "control so bm25 length-normalisation has something to compare."
+    )
+
+    store = MemoryStore.open(cwd=cwd, data_dir=data_dir)
+    try:
+        # Insert sparse FIRST so its rowid is lower than the dense one.
+        # That way a regression that drops bm25 ordering and falls back
+        # to insertion order / id tiebreak still lets sparse "win",
+        # surfacing the regression. The healthy bm25 path overrides id
+        # order and ranks dense first on term frequency.
+        sparse_id = store.add_fact(sparse, tags=["sparse"])
+        dense_id = store.add_fact(dense, tags=["dense"])
+        store.commit()
+        hits = store.recall(rare_term, top=5)
+    finally:
+        store.close()
+
+    top_id = hits[0].id if hits else None
+    ok = top_id == dense_id
+    return EvalResult(
+        name="E9_bm25_term_density",
+        metric=1.0 if ok else 0.0,
+        threshold=1.0,
+        passed=ok,
+        details={
+            "rare_term": rare_term,
+            "dense_id": dense_id,
+            "sparse_id": sparse_id,
+            "top_id": top_id,
+            "hit_count": len(hits),
+            "ranking": [
+                {"id": h.id, "score": h.score, "value": h.value[:80]} for h in hits
+            ],
+        },
+    )
+
+
 # ─────────────────────────── orchestration ───────────────────────────
 
 
@@ -439,6 +511,7 @@ def run_all(corpus_path: Path | None = None) -> list[EvalResult]:
         results.append(scenario_e6_pin_priority(tmp_root))
         results.append(scenario_e7_write_guard_reject(tmp_root))
         results.append(scenario_e8_doctor_green(main_data, main_cwd))
+        results.append(scenario_e9_bm25_term_density(tmp_root))
 
     return results
 
@@ -455,4 +528,5 @@ __all__ = [
     "scenario_e6_pin_priority",
     "scenario_e7_write_guard_reject",
     "scenario_e8_doctor_green",
+    "scenario_e9_bm25_term_density",
 ]
